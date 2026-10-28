@@ -15,6 +15,7 @@ import {
   mkdirSync,
   existsSync,
   unlinkSync,
+  chmodSync,
 } from 'node:fs';
 import { dirname } from 'node:path';
 import { tokenCacheFile } from './paths.mjs';
@@ -93,10 +94,15 @@ export function saveAuth(headers, res = DEFAULT_RESOURCE) {
         'reused and the browser will reopen on the next command. See docs/troubleshooting.md.',
     );
   }
+  // The cache is a live credential (read + send, shared mailboxes
+  // included), so owner-only. `mode` only applies when the file is
+  // created; the chmod also tightens caches older versions wrote 0644.
   writeFileSync(
     file,
     JSON.stringify({ headers, expiresAt: exp, savedAt: Date.now() }, null, 2),
+    { mode: 0o600 },
   );
+  chmodSync(file, 0o600);
 }
 
 export function clearAuth(res = DEFAULT_RESOURCE) {

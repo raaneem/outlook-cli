@@ -37,13 +37,15 @@ using it on anything you care about.
 
 | Path | Sensitivity |
 | --- | --- |
-| `~/.cache/outlook-spike/auth.json` | Contains a JWT with read+send access to your mailbox. Anyone who reads this file can act as you for ~24h. |
+| `~/.cache/outlook-spike/auth.json` | Contains a JWT with read+send access to your mailbox **and to every shared mailbox you can open** (the OWA token carries `Mail.ReadWrite.Shared` and `Mail.Send.Shared`). Anyone who reads this file can act as you for ~24h. |
 | `~/.cache/outlook-spike/auth-graph.json` | Present after `auth --all`. A Microsoft Graph token — read your Teams, Files, People, and directory, and send Teams messages. Shorter-lived (minutes) but a broader blast radius than the mail token. |
 | `~/.cache/outlook-spike/auth-substrate.json` | Present after `auth --all`. A Substrate token (Copilot / unified search). Short-lived. |
 | `~/.local/share/outlook-spike/browser-profile/` | Contains SSO cookies. Anyone with this directory can sign in as you without MFA. |
 | `~/.local/share/outlook-spike/learnings.md` | Free-form notes the AI agent has accumulated. May contain names, email addresses, project names, and habits. Plain-text markdown; user-editable. |
 
-These are stored with default user-only permissions. **Don't share them.
+The token caches are written owner-only (`0600`); a cache left
+world-readable by an older version is tightened on the next capture. The
+browser profile and learnings file use your default permissions. **Don't share them.
 Don't sync them to cloud storage. Don't commit them.** The repo `.gitignore`
 protects against `auth.json` and any `auth-*.json` filename (the per-resource
 caches) landing in-tree, but cloud-drive sync (iCloud Desktop, OneDrive,
@@ -148,10 +150,9 @@ intent is to let your agent improve over time — knowing aliases like
 
 ## Open security questions / unfinished work
 
-- The token cache is plaintext JSON. A future version should at least file-
-  permission-restrict it to `0600` explicitly and ideally seal it with the
-  macOS keychain via `security add-generic-password` so reading requires a
-  Touch ID prompt.
+- The token cache is plaintext JSON (owner-only, `0600`). Ideally it would
+  be sealed with the macOS keychain via `security add-generic-password` so
+  reading requires a Touch ID prompt.
 - The browser profile inherits Chromium's default permission model.
   Sandboxing it inside a separate user account would be a defence-in-depth
   improvement but is outside the scope of a CLI tool.
