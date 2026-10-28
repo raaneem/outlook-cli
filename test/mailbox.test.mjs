@@ -59,6 +59,14 @@ test('parseMailbox rejects values that are not an address', () => {
   }
 });
 
+test('parseMailbox accepts a repeated identical address but refuses two different ones', () => {
+  assert.equal(parseMailbox(['Shared@example.com', 'shared@example.com']), 'shared@example.com');
+  assert.throws(
+    () => parseMailbox(['shared@example.com', 'other@example.com']),
+    (e) => e.code === 'E_ARGS' && /Conflicting --mailbox/.test(e.message),
+  );
+});
+
 test('mailboxBase swaps /me for /users/{smtp} on the configured base', () => {
   const prev = process.env.OUTLOOK_API_BASE;
   try {
@@ -219,15 +227,20 @@ test('context reports the --mailbox target separately from the signed-in user', 
   assert.equal(shared.user.email, 'me@example.com');
 });
 
-test('an invalid --mailbox exits 64 before any request', async () => {
+test('an invalid or conflicting --mailbox exits 64 before any request', async () => {
   const mock = await recordingMock();
   try {
-    const { code, stderr } = await runCli(['--mailbox', 'not-an-address', 'list'], {
-      env: envFor(mock),
-    });
-    assert.equal(code, 64);
-    assert.match(stderr, /E_ARGS/);
-    assert.match(stderr, /Invalid --mailbox/);
+    const invalid = await runCli(['--mailbox', 'not-an-address', 'list'], { env: envFor(mock) });
+    assert.equal(invalid.code, 64);
+    assert.match(invalid.stderr, /E_ARGS/);
+    assert.match(invalid.stderr, /Invalid --mailbox/);
+
+    const conflicting = await runCli(
+      ['--mailbox', SHARED, 'mark-read', 'MSG1', '--mailbox', 'other@example.com'],
+      { env: envFor(mock) },
+    );
+    assert.equal(conflicting.code, 64);
+    assert.match(conflicting.stderr, /Conflicting --mailbox values/);
     assert.equal(mock.seen.length, 0);
   } finally {
     await mock.close();

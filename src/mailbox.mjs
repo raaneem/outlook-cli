@@ -18,12 +18,7 @@ import { DEFAULT_RESOURCE, resourceBase } from './resources.mjs';
 
 const ADDRESS_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
-/**
- * Validate a `--mailbox` value. Returns the lower-cased address, or null
- * when the flag was not given (act on the signed-in user's own mailbox).
- */
-export function parseMailbox(value) {
-  if (value === undefined || value === null) return null;
+function parseAddress(value) {
   const address = String(value).trim().toLowerCase();
   if (!ADDRESS_RE.test(address)) {
     throw new AppError({
@@ -33,6 +28,25 @@ export function parseMailbox(value) {
     });
   }
   return address;
+}
+
+/**
+ * Validate `--mailbox` (one value, or every repeat of the flag). Returns the
+ * lower-cased address, or null when the flag was not given (act on the
+ * signed-in user's own mailbox). Two different addresses are refused rather
+ * than letting the last one silently win.
+ */
+export function parseMailbox(value) {
+  if (value === undefined || value === null) return null;
+  const addresses = [...new Set((Array.isArray(value) ? value : [value]).map(parseAddress))];
+  if (addresses.length > 1) {
+    throw new AppError({
+      code: E.ARGS,
+      message: `Conflicting --mailbox values: ${addresses.join(', ')}`,
+      hint: 'Pass --mailbox once; a command acts on exactly one mailbox.',
+    });
+  }
+  return addresses[0] ?? null;
 }
 
 /**

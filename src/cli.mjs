@@ -255,6 +255,9 @@ program
   .option(
     '--mailbox <address>',
     'act on a shared or delegated mailbox (SMTP address) instead of your own',
+    // Collected so a repeated flag with a different address is caught,
+    // instead of the last one silently winning.
+    collect,
   )
   .hook('preAction', (cmd) => {
     const opts = cmd.optsWithGlobals();
