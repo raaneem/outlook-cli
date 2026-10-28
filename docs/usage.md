@@ -22,6 +22,7 @@ Environment variables:
 | `OUTLOOK_HTTP_TIMEOUT_MS=n` | Per-request timeout (default 30000) |
 | `OUTLOOK_NO_CAPTURE=1` | Never launch Chromium; fail with `E_AUTH_REQUIRED` instead (CI, headless boxes) |
 | `OUTLOOK_READ_ONLY=1` | Refuse every request that could change a mailbox (exit 4, `E_PRECONDITION`); reads still work. For dry runs of automation |
+| `OUTLOOK_NO_SEND=1` | Refuse only mail submission (`send`, `send-draft`, raw `/send` / `/sendmail`; exit 4). Drafting and organising still work. For unattended automation that must never send |
 | `OUTLOOK_GRAPH_BASE=/url` | Override the Microsoft Graph base URL |
 | `OUTLOOK_TOKEN_CACHE_GRAPH=/path` | Override the Graph token cache file (`_SUBSTRATE` also works) |
 | `XDG_DATA_HOME` / `XDG_CACHE_HOME` | Standard XDG roots |
@@ -36,7 +37,8 @@ rarely surface:
   once. Only if the *fresh* token is also rejected do you get
   `E_AUTH_REQUIRED` — at that point run `outlook auth`.
 - **Throttling / outage (429, 503):** retried up to 2 more times, honouring
-  the server's `Retry-After` header (capped at 30 s per wait).
+  the server's `Retry-After` header (capped at 30 s per wait). `send-draft`
+  retries only 429: a send is never repeated after a 503.
 - **Network failures (DNS, refused, timeout):** GET requests are retried
   with backoff; writes are **not** auto-retried at the network level (a
   timed-out send may already have been delivered). Failures surface as
@@ -416,6 +418,48 @@ outlook draft-forward $ID '{
 Permanently delete a draft. No confirmation prompt — call only when you're
 sure.
 
+### `outlook send-draft <id>`
+
+Send an existing draft — **immediately and irreversibly**. Two steps, by
+design:
+
+```bash
+# 1. Preview: recipients, subject, attachments, body preview, changeKey.
+outlook send-draft "$DRAFT_ID" --dry-run
+
+# 2. After the user approves that preview, send it -- quoting its changeKey.
+outlook send-draft "$DRAFT_ID" --expect-change-key "<changeKey from step 1>"
+```
+
+The send is refused (exit 4, nothing sent) if:
+
+- the draft **changed since the preview** (its `ChangeKey`, Exchange's
+  version stamp, differs — e.g. someone edited it in OWA);
+- the id is not an unsent draft (a received message is never re-sent), or
+  the draft is not in the Drafts folder;
+- it has no recipients, or more than `--max-recipients <n>`;
+- `OUTLOOK_NO_SEND` / `OUTLOOK_READ_ONLY` is set.
+
+Without `--expect-change-key` (and without `--dry-run`) it exits 64 and
+sends nothing. With `--mailbox`, the draft must be in that mailbox's Drafts
+and goes out **from** that mailbox — Exchange requires Send As (shows as the
+mailbox) or Send on Behalf (shows "you on behalf of …"); without either it
+fails with `ErrorSendAsDenied`.
+
+The send itself is never retried on a 503. If the connection drops
+mid-send, the result says `"sent": null, "outcome": "unknown"` and reports
+whether the draft is still in Drafts (exit 3). Check Sent Items before
+doing anything; don't resend blindly.
+
+```json
+{ "ok": true, "command": "send-draft", "mode": "apply", "mailbox": null, "sent": true,
+  "draft": { "id": "…", "changeKey": "…", "subject": "Re: plan",
+             "from": null, "to": [{ "name": "Alice", "address": "alice@example.com" }],
+             "cc": [], "bcc": [], "recipientCount": 1,
+             "attachments": [{ "name": "plan.pdf", "size": 1234, "contentType": "application/pdf", "isInline": false }],
+             "bodyPreview": "Sounds good…", "lastModified": "…", "webLink": "…" } }
+```
+
 ## Calendar
 
 ### `outlook agenda [options]`
@@ -576,7 +620,7 @@ true }`.
 | 1 | `EXIT.GENERAL` | Generic / unexpected error |
 | 2 | `EXIT.AUTH` | `E_AUTH_REQUIRED` or `E_AUTH_BLOCKED` |
 | 3 | `EXIT.HTTP` | `E_HTTP` (4xx/5xx from the API) |
-| 4 | `EXIT.PRECONDITION` | `E_PRECONDITION` — the mailbox isn't in the state the command needs (id not found there, draft changed since preview, writes disabled). Nothing was changed |
+| 4 | `EXIT.PRECONDITION` | `E_PRECONDITION` — the mailbox isn't in the state the command needs (id not found there, draft changed since preview or not sendable, writes or sends disabled). Nothing was changed |
 | 64 | `EXIT.USAGE` | `E_ARGS` (bad input) |
 | 130 | `EXIT.SIGINT` | Interrupted with Ctrl-C |
 

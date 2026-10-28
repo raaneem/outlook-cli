@@ -118,6 +118,23 @@ aware of:
 The SKILL.md tells every agent that loads it to confirm with the user
 before any of those three operations on attendee-bearing events.
 
+## Mail-changing commands and shared mailboxes
+
+`--mailbox` reaches every shared mailbox your account can open, with the
+same token — so the CLI can read, change, and (given Send As / Send on
+Behalf) send mail *as that mailbox*. The guard rails:
+
+| Operation | Side effect | Guard rail |
+| --- | --- | --- |
+| `mark-read`, `move`, `archive`, `categorize` | Visible to everyone who uses the mailbox (read state and categories are shared) | Every id is preflighted; if any is missing nothing changes. `--dry-run` sends only reads. No hard delete exists. |
+| `send-draft` | Mail leaves **immediately and irreversibly**, from the target mailbox | Two steps: `--dry-run` preview, then a send that must quote the preview's `changeKey` and is refused if the draft changed. Only unsent drafts in Drafts are sent; a 503 is never retried; a dropped connection is reported, never resent. |
+| `send` | Mail leaves immediately | Confirm recipient, subject, body with the user (SKILL.md). |
+
+For automation, two environment brakes are enforced at the lowest layer
+(`client.call`), so no command can bypass them: `OUTLOOK_READ_ONLY=1`
+refuses every write, and `OUTLOOK_NO_SEND=1` refuses mail submission
+while still allowing drafts and organising.
+
 ## Self-learning behaviour
 
 The CLI maintains a `learnings.md` file the AI agent reads at session

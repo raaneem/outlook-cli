@@ -1,6 +1,6 @@
 ---
 name: outlook
-description: Read, search, triage, draft, and send mail PLUS view and manage calendar events through the user's Outlook / Microsoft 365 mailbox, PLUS list Microsoft Teams (teams, channels, chats, members) and post Teams chat messages via Graph. Use when the user asks to check inbox, summarise unread mail, find a specific email, draft a reply they can review, send mail, view their calendar / agenda, find what meetings they have today / this week, create or update calendar events, RSVP to invites, check free/busy, list their Teams / chats, or send a Teams message. Works on shared / delegated mailboxes too via `--mailbox <address>`. Teams needs `outlook auth --all`; reading Teams message bodies may be blocked by tenant scope. Copilot is not supported (streaming protocol). Prefer drafts (`draft`, `draft-reply`, `draft-reply-all`, `draft-forward`) over direct send so the user can review in Outlook first. Confirm with the user before creating or cancelling events with attendees (invitations / cancellations send IMMEDIATELY). Requires the `outlook` CLI to be installed on the user's PATH; if it is not, tell the user and stop. All output is JSON to stdout; pipe through `jq` for transformation. This skill does NOT cover Gmail, IMAP, or other mail providers.
+description: Read, search, triage, draft, and send mail PLUS view and manage calendar events through the user's Outlook / Microsoft 365 mailbox, PLUS list Microsoft Teams (teams, channels, chats, members) and post Teams chat messages via Graph. Use when the user asks to check inbox, summarise unread mail, find a specific email, draft a reply they can review, send mail, view their calendar / agenda, find what meetings they have today / this week, create or update calendar events, RSVP to invites, check free/busy, list their Teams / chats, or send a Teams message. Works on shared / delegated mailboxes too via `--mailbox <address>`. Teams needs `outlook auth --all`; reading Teams message bodies may be blocked by tenant scope. Copilot is not supported (streaming protocol). Prefer drafts (`draft`, `draft-reply`, `draft-reply-all`, `draft-forward`) over direct send so the user can review in Outlook first; a draft the user has approved in chat is sent with the two-step `send-draft` (preview, then send quoting the preview's changeKey). Also organises mail: mark read/unread, move/archive, and categorise (validated against the mailbox's master categories). Confirm with the user before creating or cancelling events with attendees (invitations / cancellations send IMMEDIATELY). Requires the `outlook` CLI to be installed on the user's PATH; if it is not, tell the user and stop. All output is JSON to stdout; pipe through `jq` for transformation. This skill does NOT cover Gmail, IMAP, or other mail providers.
 ---
 
 # Using the `outlook` CLI
@@ -88,6 +88,8 @@ outlook draft-reply       <id>  [json] [--attach <path>…]   # draft reply to a
 outlook draft-reply-all   <id>  [json] [--attach <path>…]   # draft reply-all
 outlook draft-forward     <id>  [json] [--attach <path>…]   # draft a forward
 outlook discard-draft     <id>              # delete a draft
+outlook send-draft        <id> --dry-run    # preview a draft before sending (prints changeKey)
+outlook send-draft        <id> --expect-change-key <key>   # send it — ONLY after the user approved that preview
 
 # Sending (skips review — only after explicit user confirmation)
 outlook send                       [--attach <path>…]   # send mail directly (STDIN JSON)
@@ -397,6 +399,37 @@ If the user changes their mind:
 outlook discard-draft <draftId>
 ```
 
+### Sending a reviewed draft (`send-draft`)
+
+When the user wants a draft sent from chat instead of pressing Send in
+Outlook, use the two-step flow. It **sends immediately and cannot be
+undone**.
+
+```bash
+# 1. Preview, and show the user: recipients (to/cc/bcc), subject, attachments, body preview.
+outlook send-draft "$DRAFT_ID" --dry-run
+
+# 2. Only after the user explicitly approves THAT preview:
+outlook send-draft "$DRAFT_ID" --expect-change-key "<draft.changeKey from step 1>"
+```
+
+- **Never skip step 1, and never send without the user's explicit "yes"
+  to that preview.** Take the `changeKey` from the preview output; never
+  invent or reuse one from an older preview.
+- **Exit 4 "changed since it was previewed"** means the draft was edited
+  after the user saw it. Preview again and ask again.
+- Exit 4 also covers: not a draft, not in Drafts, no recipients, more than
+  `--max-recipients`, or sending disabled (`OUTLOOK_NO_SEND`). Report it;
+  don't work around it.
+- **`"outcome": "unknown"` (exit 3)** means the connection dropped mid-send.
+  Do NOT retry. Tell the user to check Sent Items (the result says whether
+  the draft is still in Drafts).
+- With `--mailbox`, the mail goes out **from the shared mailbox**. Say so
+  when asking for approval. `ErrorSendAsDenied` means the user lacks Send
+  As / Send on Behalf there.
+- Pass `--max-recipients <n>` when you expect a small audience, so a
+  surprise reply-all fails instead of sending.
+
 ## Calendar
 
 ### Reading the calendar
@@ -570,7 +603,7 @@ outlook list --unread -n 50 2>/dev/null | jq '.value | length'
 | 0 | Success | — |
 | 2 | `E_AUTH_REQUIRED` / `E_AUTH_BLOCKED`. Session is gone — the CLI already tried to re-capture a token automatically and failed. | **Ask the user to run `outlook auth` manually.** You cannot run `outlook auth` yourself — it opens a browser window the user must interact with for MFA. |
 | 3 | `E_HTTP` (API returned 4xx/5xx after automatic retries) or `E_NETWORK` (could not reach the API at all). The stderr block includes the server's error message. | For `E_HTTP`, read the message and fix the request or surface the error. For `E_NETWORK`, tell the user their network/VPN looks down. |
-| 4 | `E_PRECONDITION`. The mailbox isn't in the state the command needs: an id isn't in that mailbox (wrong `--mailbox`, or the message moved and got a new id), or `OUTLOOK_READ_ONLY` is set. **Nothing was changed.** | Re-list for fresh ids and check `--mailbox`. Don't loop. |
+| 4 | `E_PRECONDITION`. The mailbox isn't in the state the command needs: an id isn't in that mailbox (wrong `--mailbox`, or the message moved and got a new id), a draft changed since its preview or isn't sendable, or `OUTLOOK_READ_ONLY` / `OUTLOOK_NO_SEND` is set. **Nothing was changed or sent.** | Re-list for fresh ids, check `--mailbox`, or re-preview the draft. Don't loop. |
 | 64 | `E_ARGS`. Bad input (invalid JSON, non-numeric `--top`, unknown flag). | Fix the flag / JSON and retry. |
 | 130 | User pressed Ctrl-C. | Stop. |
 
@@ -590,6 +623,9 @@ clearly. Do not loop trying to re-authenticate.
 - "When did <person> last email me?" → `outlook list --from <addr> -n 1`
 - "Find emails from this week with attachments" → `outlook list --since 7d --has-attachments`
 - "What did I send to <person> last month?" → `outlook list --folder Sent --to <addr> --since 30d`
+- "Mark those as read" / "archive that" → `outlook mark-read <ids…>` / `outlook archive <ids…>`
+- "Tag it as <category>" → `outlook categories`, then `outlook categorize <id> --add "<name>"`
+- "Send the draft" (after reviewing it in chat) → `outlook send-draft <id> --dry-run`, get a yes, then `--expect-change-key`
 
 ## When NOT to use this skill
 
@@ -610,6 +646,10 @@ clearly. Do not loop trying to re-authenticate.
   recipient + subject + body with the user, in plain English, before
   sending. When in doubt, use `draft-reply` / `draft` and let the user
   send from Outlook.
+- Don't run `send-draft` without first showing the user its `--dry-run`
+  preview and getting an explicit yes to that exact preview.
+- Don't use `--allow-unlisted` to "fix" an unknown-category error. Pick a
+  name from `outlook categories` or ask the user.
 - Don't suggest installation or configuration steps. The CLI is either on
   PATH or it isn't.
 

@@ -46,21 +46,33 @@ function envFlag(name) {
 
 // POSTs that only read: getSchedule (free-busy) is a lookup with a body.
 const READ_ONLY_POSTS = /\/getSchedule$/i;
+// Mail submission: /messages/{id}/send and /sendmail (any casing).
+const SEND_ROUTES = /\/(send|sendmail)$/i;
 
 /**
- * Process-wide brake, enforced here so no command -- or helper script that
- * imports call() -- can forget it: OUTLOOK_READ_ONLY refuses every request
- * that could change a mailbox. Meant for dry runs of automation.
+ * Process-wide brakes, enforced here so no command -- or helper script
+ * that imports call() -- can forget them. OUTLOOK_READ_ONLY refuses every
+ * request that could change a mailbox (dry runs of automation);
+ * OUTLOOK_NO_SEND refuses only mail submission, so unattended automation
+ * can organise mail but never send it.
  */
 function assertWriteAllowed(method, path) {
-  if (method === 'GET' || !envFlag('OUTLOOK_READ_ONLY')) return;
+  if (method === 'GET') return;
   const route = path.split('?')[0];
-  if (method === 'POST' && READ_ONLY_POSTS.test(route)) return;
-  throw new AppError({
-    code: E.PRECONDITION,
-    message: `Refusing ${method} ${route}: OUTLOOK_READ_ONLY is set.`,
-    hint: 'Unset OUTLOOK_READ_ONLY to allow changes, or preview with --dry-run.',
-  });
+  if (envFlag('OUTLOOK_READ_ONLY') && !(method === 'POST' && READ_ONLY_POSTS.test(route))) {
+    throw new AppError({
+      code: E.PRECONDITION,
+      message: `Refusing ${method} ${route}: OUTLOOK_READ_ONLY is set.`,
+      hint: 'Unset OUTLOOK_READ_ONLY to allow changes, or preview with --dry-run.',
+    });
+  }
+  if (envFlag('OUTLOOK_NO_SEND') && method === 'POST' && SEND_ROUTES.test(route)) {
+    throw new AppError({
+      code: E.PRECONDITION,
+      message: `Refusing to send mail (POST ${route}): OUTLOOK_NO_SEND is set.`,
+      hint: 'Unset OUTLOOK_NO_SEND to allow sending. Drafts can still be created.',
+    });
+  }
 }
 
 function networkError(cause, url) {
@@ -86,15 +98,17 @@ function networkError(cause, url) {
  *
  * Transient failures are retried up to MAX_ATTEMPTS with backoff:
  *   - 429/503 responses (throttled/unavailable — not processed) for any method.
+ *     `init.retryStatuses` narrows that set for a call that must not repeat
+ *     (send-draft retries only 429).
  *   - Network-level errors (DNS, refused, timeout) for GET only, since a
  *     write that timed out mid-flight may already have been applied.
  * Anything that still fails maps to AppError(E.NETWORK); HTTP statuses are
  * returned to the caller untouched.
  */
 export async function call(auth, path, init = {}) {
-  // `resource` and `mailbox` are routing hints, not fetch options -- pull
-  // them out.
-  const { resource: res_, mailbox, ...fetchInit } = init;
+  // `resource`, `mailbox` and `retryStatuses` steer routing and retries;
+  // they are not fetch options -- pull them out.
+  const { resource: res_, mailbox, retryStatuses = RETRYABLE_STATUSES, ...fetchInit } = init;
   const key = res_ ?? DEFAULT_RESOURCE;
   if (mailbox && key !== DEFAULT_RESOURCE) {
     // Graph and Substrate address other users differently; silently
@@ -134,7 +148,7 @@ export async function call(auth, path, init = {}) {
       throw networkError(cause, url);
     }
 
-    if (RETRYABLE_STATUSES.has(res.status) && attempt < MAX_ATTEMPTS - 1) {
+    if (retryStatuses.has(res.status) && attempt < MAX_ATTEMPTS - 1) {
       const wait = retryDelayMs(res, attempt);
       debug(`HTTP ${res.status}; retrying in ${wait}ms`);
       await res.text().catch(() => {}); // drain so the connection is reusable

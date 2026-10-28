@@ -118,6 +118,7 @@ src/
   actions.mjs    # batch runner for message-changing commands: id parsing, preflight, per-message results
   folders.mjs    # move/archive destinations: well-known names, folder paths, Ids
   categories.mjs # categorize: master-list validation, canonical spelling, add/remove/set/clear
+  send-draft.mjs # send-draft: preview + sendability checks (IsDraft, Drafts folder, ChangeKey)
   audit.mjs      # token-audit: decode cached tokens + group scopes into capability areas (offline)
   learn.mjs      # persistent learnings (load/add/forget/clear)
   jwt.mjs        # tiny JWT payload decoder (no signature validation)
@@ -164,8 +165,10 @@ slows down every command).
   only GETs, one JSON result with per-message status. Don't hand-roll a
   write loop for a new verb.
 - **Recovery is automatic where safe.** A 401 clears the cache, recaptures
-  once, and retries; 429/503 retry with `Retry-After` backoff; network
-  errors retry GETs only. Don't add per-command retry loops on top of this.
+  once, and retries; 429/503 retry with `Retry-After` backoff (a call that
+  must never repeat narrows this with `retryStatuses` — `send-draft` retries
+  only 429); network errors retry GETs only. Don't add per-command retry
+  loops on top of this.
 - **Dependencies stay minimal.** Right now only `commander` and `playwright`.
   Adding a dep requires a clear justification (writing your own would be
   significant work).

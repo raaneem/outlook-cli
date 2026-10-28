@@ -27,7 +27,13 @@ import { AppError, E, EXIT, exitCodeFor } from './errors.mjs';
 import { buildFilter, buildQuery, resolveFolder, parseCount } from './odata.mjs';
 import { RESOURCES } from './resources.mjs';
 import { parseMailbox } from './mailbox.mjs';
-import { parseMessageIds, runMessageBatch } from './actions.mjs';
+import {
+  parseMessageIds,
+  runMessageBatch,
+  validateMessageId,
+  isMissingItem,
+} from './actions.mjs';
+import { DRAFT_SELECT, draftPreview, assertSendable } from './send-draft.mjs';
 import { resolveDestination } from './folders.mjs';
 import {
   parseCategoryChange,
@@ -1280,6 +1286,108 @@ program
     });
     // sendmail returns 202 with no body on success.
     printJson(body || { sent: true });
+  });
+
+// ---------------------------------------------------------------------------
+// Sending a reviewed draft. Two steps by design: `--dry-run` prints the draft
+// and its ChangeKey for the user to approve; the real send must quote that
+// ChangeKey and is refused if the draft changed in between (send-draft.mjs).
+
+// A send is not worth even a small risk of going out twice: retry only
+// throttling (429, which Exchange rejects unprocessed), never a 503.
+const THROTTLE_ONLY = new Set([429]);
+
+/** Whether the draft still sits in Drafts: true / false, or null if unknown. */
+async function draftStillInDrafts(id, draftsFolderId) {
+  try {
+    const draft = await runApi(`${messagePath(id)}?$select=Id,ParentFolderId`);
+    return draft?.ParentFolderId === draftsFolderId;
+  } catch (err) {
+    return isMissingItem(err) ? false : null;
+  }
+}
+
+program
+  .command('send-draft')
+  .argument('<id>', 'draft Id (DraftId from draft / draft-reply / …, or from `list --folder Drafts`)')
+  .option('--dry-run', 'print the draft that would be sent and its changeKey; send nothing')
+  .option('--expect-change-key <key>', 'send only if the draft still has this changeKey (from --dry-run)')
+  .option('--max-recipients <n>', 'refuse to send to more than n recipients (To + Cc + Bcc)')
+  .description(
+    'Send an existing draft. **Sends immediately and cannot be undone.**\n' +
+      'Step 1: `send-draft <id> --dry-run` prints the draft and its changeKey.\n' +
+      'Step 2, after the user approves it: `send-draft <id> --expect-change-key <key>`.\n' +
+      'Refused if the draft changed in between, is not in Drafts, or has no recipients.',
+  )
+  .action(async (rawId, opts) => {
+    const id = validateMessageId(rawId);
+    if (!opts.dryRun && opts.expectChangeKey === undefined) {
+      throw new AppError({
+        code: E.ARGS,
+        message: 'send-draft needs --expect-change-key (or --dry-run to preview first).',
+        hint: 'Run `outlook send-draft <id> --dry-run`, show the preview to the user, then pass its changeKey.',
+      });
+    }
+    const maxRecipients =
+      opts.maxRecipients === undefined ? null : parseCount(opts.maxRecipients, '--max-recipients');
+    const where = activeMailbox ?? 'your mailbox';
+
+    let draft;
+    try {
+      draft = await runApi(`${messagePath(id)}?$select=${DRAFT_SELECT}`);
+    } catch (err) {
+      if (!isMissingItem(err)) throw err;
+      throw new AppError({
+        code: E.PRECONDITION,
+        message: `Draft not found in ${where}: ${id}`,
+        hint:
+          err.serverCode === 'ErrorInvalidMailboxItemId'
+            ? 'The id belongs to a different mailbox. Pass the same --mailbox the draft was created with.'
+            : 'It may already have been sent or deleted. Check Sent Items before doing anything else.',
+      });
+    }
+    const drafts = await runApi('/mailfolders/Drafts?$select=Id');
+    const attachments = draft.HasAttachments
+      ? ((await runApi(`${messagePath(id)}/attachments?$select=Name,Size,ContentType,IsInline`))
+          ?.value ?? [])
+      : [];
+    const preview = draftPreview(draft, attachments);
+    assertSendable(draft, {
+      draftsFolderId: drafts?.Id,
+      expectChangeKey: opts.expectChangeKey,
+      maxRecipients,
+      where,
+    });
+
+    const result = {
+      ok: true,
+      command: 'send-draft',
+      mode: opts.dryRun ? 'dry-run' : 'apply',
+      mailbox: activeMailbox,
+      draft: preview,
+    };
+    if (opts.dryRun) {
+      printJson({ ...result, sent: false });
+      return;
+    }
+
+    try {
+      await runApi(`${messagePath(id)}/send`, { method: 'POST', retryStatuses: THROTTLE_ONLY });
+    } catch (err) {
+      if (!(err instanceof AppError) || err.code !== E.NETWORK) throw err;
+      // The request may or may not have reached Exchange. Look; never resend.
+      const stillThere = await draftStillInDrafts(id, drafts?.Id);
+      printJson({ ...result, ok: false, sent: null, outcome: 'unknown', draftStillInDrafts: stillThere });
+      throw new AppError({
+        code: E.NETWORK,
+        message: `The send request for ${id} failed mid-flight; it may or may not have gone out.`,
+        hint:
+          stillThere === false
+            ? 'The draft is no longer in Drafts, so it was most likely sent. Check Sent Items; do NOT resend.'
+            : 'Check Sent Items before trying again; a blind retry could send it twice.',
+      });
+    }
+    printJson({ ...result, sent: true });
   });
 
 // ---------------------------------------------------------------------------

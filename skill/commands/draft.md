@@ -21,4 +21,7 @@ If the user wants a brand-new message (not a reply), use `outlook draft`
 with the full Message JSON.
 
 **Do not send mail directly via `outlook send` from this command — the
-whole point of `/draft` is the review step in Outlook.**
+whole point of `/draft` is the review step in Outlook.** If the user later
+asks you to send the draft from chat, use the two-step flow: show
+`outlook send-draft <DraftId> --dry-run`, get an explicit yes to that
+preview, then `outlook send-draft <DraftId> --expect-change-key <key>`.

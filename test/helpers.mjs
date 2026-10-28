@@ -120,7 +120,7 @@ export function startMockServer(handler) {
  * tests prove it by checking `writes()`.
  *
  * `faults` maps "METHOD /path" (path after the mailbox, ids decoded) to a
- * canned `{ status, body }`, or to 'drop' to cut the connection.
+ * canned `{ status, body, headers }`, or to 'drop' to cut the connection.
  *
  * Folder:  { Id, DisplayName, ParentId?, WellKnownName? }
  * Message: { Id, Subject, ParentFolderId, IsRead?, Categories?, IsDraft?,
@@ -174,7 +174,10 @@ export async function startFakeMailbox(mailboxes, { faults = {} } = {}) {
 
       const fault = faults[`${req.method} ${path}`];
       if (fault === 'drop') return req.socket.destroy();
-      if (fault) return reply(res, fault.status, fault.body);
+      if (fault) {
+        res.writeHead(fault.status, { 'Content-Type': 'application/json', ...(fault.headers ?? {}) });
+        return res.end(fault.body === undefined ? '' : JSON.stringify(fault.body));
+      }
 
       const box = boxes[key];
       if (!box) return fail(res, 404, 'ErrorNonExistentMailbox');
@@ -263,6 +266,7 @@ function isolatedEnv() {
     OUTLOOK_GRAPH_BASE: `${dead}/graph/v1.0`,
     OUTLOOK_SUBSTRATE_BASE: `${dead}/substrate`,
     OUTLOOK_READ_ONLY: '',
+    OUTLOOK_NO_SEND: '',
     OUTLOOK_DEBUG: '',
     DEBUG: '',
   };

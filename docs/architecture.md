@@ -168,7 +168,7 @@ code:
 | `E_AUTH_REQUIRED` | No usable session; run `outlook auth` | 2 |
 | `E_AUTH_BLOCKED` | Browser loaded OWA but never produced a Bearer | 2 |
 | `E_HTTP` | API returned 4xx/5xx | 3 |
-| `E_PRECONDITION` | Mailbox not in the required state (id not in that mailbox, writes disabled); nothing changed | 4 |
+| `E_PRECONDITION` | Mailbox not in the required state (id not in that mailbox, draft changed since preview, writes or sends disabled); nothing changed | 4 |
 | `E_ARGS` | Bad input (e.g. invalid JSON to `send`) | 64 |
 | `E_UNEXPECTED` | Anything we didn't anticipate | 1 |
 

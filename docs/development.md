@@ -27,6 +27,7 @@ adds `outlook` to your `$PATH`.
 | `src/actions.mjs` | Batch runner for message-changing commands (`mark-read`, `move`, `categorize`, …): id parsing, preflight, per-message results |
 | `src/folders.mjs` | Destination folders for `move` / `archive`: well-known names (by role, not display name), folder paths, Ids |
 | `src/categories.mjs` | `categorize`: master-category validation, canonical spelling, add/remove/set/clear |
+| `src/send-draft.mjs` | `send-draft` preview and sendability checks (unsent draft, in Drafts, recipients, unchanged ChangeKey) |
 | `src/audit.mjs` | `token-audit` — decode cached tokens + group scopes into capability areas (offline) |
 | `src/odata.mjs` | Mail filter / query builders (`--unread`, `--from`, `--folder`, …) |
 | `src/calendar.mjs` | Calendar time parsing, calendarView URL builder, event filters |
