@@ -73,6 +73,10 @@ outlook search  "<query>" [filters]  # KQL full-text search
 outlook read    <id>                 # full message JSON
 outlook folders                       # list mail folders
 
+# Organising (ids as args or STDIN; preflight first; --dry-run previews; JSON result)
+outlook mark-read   <id…> [--dry-run]       # mark messages read
+outlook mark-unread <id…> [--dry-run]       # mark messages unread
+
 # Drafting (review-first — preferred for AI-generated mail)
 outlook draft             <json>  [--attach <path>…]   # new draft (reads STDIN if no arg)
 outlook draft-reply       <id>  [json] [--attach <path>…]   # draft reply to a message
@@ -182,7 +186,8 @@ Rules:
 
 - **Ids belong to one mailbox.** Pass the same `--mailbox` to every command
   that uses an id you got from a `--mailbox` listing. A mismatch fails with
-  `ErrorInvalidMailboxItemId` (exit 3) — fix the flag, don't retry blindly.
+  `ErrorInvalidMailboxItemId` (exit 3 for `read`/drafts, exit 4 for the
+  organising commands) — fix the flag, don't retry blindly.
 - **Be explicit about which mailbox you are acting on** when you report back
   ("drafted in shared@example.com's Drafts"). Outputs include a `Mailbox`
   field for this.
@@ -212,6 +217,33 @@ outlook list --from alice@example.com --since 7d
 # Works but slower / less precise
 outlook search "from:alice"
 ```
+
+## Organising mail
+
+Commands that change existing messages take one or more ids (arguments,
+or STDIN as a JSON array / one per line) and print one JSON result:
+
+```bash
+outlook mark-read "$ID1" "$ID2"
+outlook unread --from noreply@example.com | jq -r '.value[].Id' | outlook mark-read --dry-run
+```
+
+```json
+{ "ok": true, "command": "mark-read", "mode": "apply", "mailbox": null, "aborted": false,
+  "counts": { "requested": 2, "changed": 1, "skipped": 1, "notFound": 0, "failed": 0, … },
+  "items": [ { "id": "…", "status": "changed", "before": {…}, "after": {…} },
+             { "id": "…", "status": "skipped", "reason": "already-read" } ] }
+```
+
+- Every id is checked first. If any is missing from that mailbox,
+  **nothing changes** (`aborted: true`, exit 4) — re-list for fresh ids,
+  and check `--mailbox`.
+- Use `--dry-run` to show the user what a bulk change would do before
+  doing it. It sends no writes.
+- Read `ok` and `counts`, and report per-message `failed` items to the
+  user. Don't retry the whole batch blindly — already-done messages are
+  skipped, so re-running only what failed is safe.
+- Only change messages the user asked you to change.
 
 ## Drafting mail (review-first — STRONGLY PREFERRED)
 
@@ -497,6 +529,7 @@ outlook list --unread -n 50 2>/dev/null | jq '.value | length'
 | 0 | Success | — |
 | 2 | `E_AUTH_REQUIRED` / `E_AUTH_BLOCKED`. Session is gone — the CLI already tried to re-capture a token automatically and failed. | **Ask the user to run `outlook auth` manually.** You cannot run `outlook auth` yourself — it opens a browser window the user must interact with for MFA. |
 | 3 | `E_HTTP` (API returned 4xx/5xx after automatic retries) or `E_NETWORK` (could not reach the API at all). The stderr block includes the server's error message. | For `E_HTTP`, read the message and fix the request or surface the error. For `E_NETWORK`, tell the user their network/VPN looks down. |
+| 4 | `E_PRECONDITION`. The mailbox isn't in the state the command needs: an id isn't in that mailbox (wrong `--mailbox`, or the message moved and got a new id), or `OUTLOOK_READ_ONLY` is set. **Nothing was changed.** | Re-list for fresh ids and check `--mailbox`. Don't loop. |
 | 64 | `E_ARGS`. Bad input (invalid JSON, non-numeric `--top`, unknown flag). | Fix the flag / JSON and retry. |
 | 130 | User pressed Ctrl-C. | Stop. |
 

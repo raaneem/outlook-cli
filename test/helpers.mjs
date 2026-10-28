@@ -110,6 +110,136 @@ export function startMockServer(handler) {
 }
 
 /**
+ * In-memory stand-in for Exchange mailboxes, served over HTTP like
+ * startMockServer, for the commands that change messages. `mailboxes` maps
+ * "me" and SMTP addresses to `{ folders, messages, categories }`; requests
+ * under /api/v2.0/me/... and /api/v2.0/users/{smtp}/... hit the matching
+ * mailbox. Like Exchange, an id is bound to its mailbox (a foreign id gets
+ * 400 ErrorInvalidMailboxItemId) and a moved or sent message gets a new
+ * Id. It accepts any write it can perform -- refusing is the CLI's job, and
+ * tests prove it by checking `writes()`.
+ *
+ * `faults` maps "METHOD /path" (path after the mailbox, ids decoded) to a
+ * canned `{ status, body }`, or to 'drop' to cut the connection.
+ *
+ * Folder:  { Id, DisplayName, ParentId?, WellKnownName? }
+ * Message: { Id, Subject, ParentFolderId, IsRead?, Categories?, IsDraft?,
+ *            ChangeKey?, ToRecipients?, Attachments?, ... }
+ */
+export async function startFakeMailbox(mailboxes, { faults = {} } = {}) {
+  const boxes = structuredClone(mailboxes);
+  const requests = [];
+  let seq = 0;
+
+  const reply = (res, status, body) => {
+    res.writeHead(status, { 'Content-Type': 'application/json' });
+    res.end(body === undefined ? '' : JSON.stringify(body));
+  };
+  const fail = (res, status, code) => reply(res, status, { error: { code, message: code } });
+  const findMessage = (box, id) => box.messages.find((m) => m.Id === id);
+  const folderBy = (box, ref) =>
+    box.folders.find(
+      (f) => f.Id === ref || f.WellKnownName?.toLowerCase() === String(ref).toLowerCase(),
+    );
+  const page = (list, query) => {
+    const skip = Number(query.get('$skip') ?? 0);
+    const top = Number(query.get('$top') ?? 10);
+    return { value: list.slice(skip, skip + top) };
+  };
+
+  const server = await startMockServer((req, res) => {
+    let raw = '';
+    req.on('data', (d) => (raw += d));
+    req.on('end', () => {
+      const url = new URL(req.url, 'http://fake');
+      const match = url.pathname.match(/^\/api\/v2\.0\/(me|users\/([^/]+))(\/.*)?$/);
+      if (!match) return fail(res, 404, 'FakeUnknownBase');
+      const key = match[1] === 'me' ? 'me' : decodeURIComponent(match[2]);
+      const segs = (match[3] ?? '').split('/').filter(Boolean).map(decodeURIComponent);
+      const path = `/${segs.join('/')}`;
+      let body = null;
+      try {
+        body = raw ? JSON.parse(raw) : null;
+      } catch {
+        body = raw;
+      }
+      requests.push({
+        method: req.method,
+        mailbox: key,
+        path,
+        query: Object.fromEntries(url.searchParams),
+        anchor: req.headers['x-anchormailbox'],
+        body,
+      });
+
+      const fault = faults[`${req.method} ${path}`];
+      if (fault === 'drop') return req.socket.destroy();
+      if (fault) return reply(res, fault.status, fault.body);
+
+      const box = boxes[key];
+      if (!box) return fail(res, 404, 'ErrorNonExistentMailbox');
+
+      if (segs[0] === 'messages' && segs[1]) {
+        const msg = findMessage(box, segs[1]);
+        if (!msg) {
+          const elsewhere = Object.values(boxes).some((b) => findMessage(b, segs[1]));
+          return elsewhere
+            ? fail(res, 400, 'ErrorInvalidMailboxItemId')
+            : fail(res, 404, 'ErrorItemNotFound');
+        }
+        const action = segs[2];
+        if (req.method === 'GET' && !action) return reply(res, 200, msg);
+        if (req.method === 'GET' && action === 'attachments') {
+          return reply(res, 200, { value: msg.Attachments ?? [] });
+        }
+        if (req.method === 'PATCH' && !action) {
+          Object.assign(msg, body);
+          msg.ChangeKey = `CK${++seq}`;
+          return reply(res, 200, msg);
+        }
+        if (req.method === 'POST' && action === 'move') {
+          const dest = folderBy(box, body?.DestinationId);
+          if (!dest) return fail(res, 404, 'ErrorFolderNotFound');
+          msg.ParentFolderId = dest.Id;
+          msg.Id = `${msg.Id}M${++seq}`;
+          return reply(res, 201, msg);
+        }
+        if (req.method === 'POST' && action === 'send') {
+          msg.ParentFolderId = folderBy(box, 'SentItems')?.Id ?? null;
+          msg.IsDraft = false;
+          msg.Id = `${msg.Id}S${++seq}`;
+          return reply(res, 202);
+        }
+      }
+
+      if (req.method === 'GET' && segs[0] === 'mailfolders') {
+        if (!segs[1]) return reply(res, 200, page(box.folders.filter((f) => !f.ParentId), url.searchParams));
+        const folder = folderBy(box, segs[1]);
+        if (!folder) return fail(res, 404, 'ErrorFolderNotFound');
+        if (!segs[2]) return reply(res, 200, folder);
+        if (segs[2] === 'childfolders') {
+          return reply(res, 200, page(box.folders.filter((f) => f.ParentId === folder.Id), url.searchParams));
+        }
+      }
+
+      if (req.method === 'GET' && path === '/MasterCategories') {
+        return reply(res, 200, { value: box.categories ?? [] });
+      }
+
+      return fail(res, 501, 'FakeRouteNotImplemented');
+    });
+  });
+
+  return {
+    ...server,
+    requests,
+    boxes,
+    /** Every request that was not a GET -- what a dry run must leave empty. */
+    writes: () => requests.filter((r) => r.method !== 'GET'),
+  };
+}
+
+/**
  * Environment every CLI run starts from: layered over process.env, under
  * the test's own `env`. A developer machine has a real token cache and a
  * real network, so a test that forgets to pin a cache path or an API base
@@ -132,6 +262,7 @@ function isolatedEnv() {
     OUTLOOK_API_BASE: `${dead}/api/v2.0/me`,
     OUTLOOK_GRAPH_BASE: `${dead}/graph/v1.0`,
     OUTLOOK_SUBSTRATE_BASE: `${dead}/substrate`,
+    OUTLOOK_READ_ONLY: '',
     OUTLOOK_DEBUG: '',
     DEBUG: '',
   };

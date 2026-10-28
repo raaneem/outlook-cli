@@ -18,6 +18,7 @@ code from the table below.
 | `E_AUTH_BLOCKED` | 2 | Browser loaded OWA but never produced a Bearer token (or the window was closed mid-capture). | See "Bearer never observed" below |
 | `E_HTTP` | 3 | Outlook API returned 4xx/5xx after retries. The hint contains the server's error message. | Depends on body — see "HTTP errors" below |
 | `E_NETWORK` | 3 | Could not reach the API at all (DNS, connection refused, timeout) after retries. | Check network/VPN/proxy; raise `OUTLOOK_HTTP_TIMEOUT_MS` on slow links |
+| `E_PRECONDITION` | 4 | The mailbox isn't in the state the command needs: an id isn't in the target mailbox, or `OUTLOOK_READ_ONLY` refused a write. **Nothing was changed.** | See "Shared mailboxes and organising mail" below |
 | `E_ARGS` | 64 | Bad input (e.g. invalid JSON for `send`, non-numeric `--top`, unknown flag). | Fix the input |
 | `E_UNEXPECTED` | 1 | Something we didn't anticipate. | Re-run with `--debug` and read the stack trace |
 
@@ -100,6 +101,33 @@ actually click through anything they show. **Fix:** re-run
 `outlook auth --all` and check every tab that opens (not just the first)
 before it closes on its own; if a Teams/Copilot tab shows a prompt,
 complete it there too. See LEARNINGS.md §15 for the full story.
+
+## Shared mailboxes and organising mail
+
+### `ErrorInvalidMailboxItemId` ("Item Id doesn't belong to the current mailbox")
+
+The id came from a different mailbox than the one you're calling. Ids are
+bound to their mailbox: an id listed with `--mailbox shared@example.com`
+only works with that same `--mailbox`, and vice versa. It is **not** a
+transient routing error — retrying other URL shapes won't help (see
+[`LEARNINGS.md`](../LEARNINGS.md) §16). The organising commands report
+it per message and change nothing (exit 4).
+
+### `ErrorItemNotFound` / "not-found" for an id you just listed
+
+The message was deleted or **moved**. Ids in this tenant are not
+immutable, so a moved message has a new Id (`move` / `archive` return it
+as `newId`). List again for fresh ids.
+
+### `ErrorAccessDenied` or `ErrorNonExistentMailbox` with `--mailbox`
+
+Check the address, and that your account has Full Access to that mailbox
+(Exchange permission, not something the CLI or token controls).
+
+### "Refusing …: OUTLOOK_READ_ONLY is set"
+
+`OUTLOOK_READ_ONLY` is on in your environment, so every write is refused
+(exit 4) while reads still work. Unset it to make changes.
 
 ### "Chromium flashes on every call"
 

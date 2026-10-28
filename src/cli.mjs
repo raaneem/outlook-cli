@@ -6,7 +6,8 @@
 //   - stdout: command result (JSON), pretty-printed when on a TTY, compact
 //     when piped — so `outlook list | jq …` Just Works.
 //   - stderr: diagnostics, progress, errors. Never pollutes stdout.
-//   - Exit codes: 0 ok, 1 generic, 2 auth, 3 HTTP, 64 usage, 130 SIGINT.
+//   - Exit codes: 0 ok, 1 generic, 2 auth, 3 HTTP, 4 precondition, 64 usage,
+//     130 SIGINT.
 //   - Errors carry trackable codes (E_AUTH_*, E_HTTP, E_ARGS) + actionable hints.
 //   - STDIN: `send` accepts message JSON via STDIN when no arg is given.
 
@@ -26,6 +27,7 @@ import { AppError, E, EXIT, exitCodeFor } from './errors.mjs';
 import { buildFilter, buildQuery, resolveFolder, parseCount } from './odata.mjs';
 import { RESOURCES } from './resources.mjs';
 import { parseMailbox } from './mailbox.mjs';
+import { parseMessageIds, runMessageBatch } from './actions.mjs';
 import { auditAll } from './audit.mjs';
 import {
   resolveEventRange,
@@ -116,10 +118,13 @@ function httpErrorHint(body) {
 }
 
 function httpError(res, method, path) {
+  const serverCode = res.body?.error?.code;
   return new AppError({
     code: E.HTTP,
     message: `${method} ${path.split('?')[0]} returned HTTP ${res.status}.`,
     hint: httpErrorHint(res.body),
+    status: res.status,
+    ...(typeof serverCode === 'string' ? { serverCode } : {}),
   });
 }
 
@@ -850,6 +855,90 @@ program
     const body = await runApi('/mailfolders');
     printJson(body);
   });
+
+// ---------------------------------------------------------------------------
+// Organising mail: commands that change existing messages. They share the
+// preflight-then-apply runner in actions.mjs, take ids as arguments or on
+// STDIN, support --dry-run, and print one JSON result per call.
+
+const JSON_HEADERS = { 'Content-Type': 'application/json' };
+const DRY_RUN_HELP = 'show what would change, without changing anything';
+const IDS_HELP = 'message Ids (from `outlook list`); read from STDIN when omitted';
+
+const messagePath = (id) => `/messages/${encodeURIComponent(id)}`;
+
+/** STDIN text for an id list -- read only when no ids were passed as arguments. */
+async function idsInput(args) {
+  return args.length > 0 || process.stdin.isTTY ? '' : readStdin();
+}
+
+/**
+ * Print a batch result, then throw if anything failed so the exit code says
+ * so too. The JSON on stdout always carries the per-message detail.
+ */
+function finishBatch(result) {
+  printJson(result);
+  if (result.ok) return;
+  const failures = result.items.filter((item) => item.error);
+  const first = failures[0].error;
+  const allMissing = failures.every((item) => item.status === 'not-found');
+  const where = result.mailbox ?? 'your mailbox';
+  let hint = first.hint;
+  if (allMissing) {
+    hint =
+      first.serverCode === 'ErrorInvalidMailboxItemId'
+        ? 'The id belongs to a different mailbox. Pass the same --mailbox the id was listed from.'
+        : `Not found in ${where}: deleted, or moved (a move gives a message a new Id). List again for fresh ids.`;
+  }
+  const summary = result.aborted
+    ? `${failures.length} of ${result.counts.requested} message(s) could not be loaded, so nothing was changed`
+    : `${result.counts.failed} of ${result.counts.requested} message(s) failed`;
+  throw new AppError({
+    code: allMissing ? E.PRECONDITION : first.code,
+    message: `${result.command}: ${summary}. First error: ${first.message}`,
+    hint: `${hint ? `${hint} ` : ''}Per-message results are in the JSON on stdout.`,
+  });
+}
+
+for (const [name, isRead] of [
+  ['mark-read', true],
+  ['mark-unread', false],
+]) {
+  const state = isRead ? 'read' : 'unread';
+  program
+    .command(name)
+    .argument('[ids...]', IDS_HELP)
+    .option('--dry-run', DRY_RUN_HELP)
+    .description(
+      `Mark messages as ${state}; messages already ${state} are skipped.\n` +
+        'In a shared mailbox, read state is shared by everyone who uses it.',
+    )
+    .action(async (args, opts) => {
+      const ids = parseMessageIds(args, await idsInput(args));
+      const result = await runMessageBatch({
+        command: name,
+        ids,
+        mailbox: activeMailbox,
+        dryRun: !!opts.dryRun,
+        load: (id) => runApi(`${messagePath(id)}?$select=Id,Subject,IsRead`),
+        plan: (message, id) =>
+          message.IsRead === isRead
+            ? { skip: `already-${state}` }
+            : {
+                before: { isRead: message.IsRead ?? null },
+                after: { isRead },
+                apply: async () => {
+                  await runApi(messagePath(id), {
+                    method: 'PATCH',
+                    headers: JSON_HEADERS,
+                    body: JSON.stringify({ IsRead: isRead }),
+                  });
+                },
+              },
+      });
+      finishBatch(result);
+    });
+}
 
 /** Where a new draft went -- with --mailbox it is the shared mailbox's Drafts. */
 function draftSavedMessage() {

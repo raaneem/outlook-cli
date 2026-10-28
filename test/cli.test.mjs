@@ -23,7 +23,7 @@ test('--version prints semver to stdout, exits 0', async () => {
 test('--help lists all commands', async () => {
   const { code, stdout } = await runCli(['--help']);
   assert.equal(code, 0);
-  for (const cmd of ['auth', 'refresh', 'logout', 'list', 'search', 'read', 'folders', 'send']) {
+  for (const cmd of ['auth', 'refresh', 'logout', 'list', 'search', 'read', 'folders', 'send', 'mark-read', 'mark-unread']) {
     assert.match(stdout, new RegExp(`^\\s*${cmd}\\b`, 'm'), `expected to see "${cmd}" in help`);
   }
 });

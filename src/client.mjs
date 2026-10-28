@@ -38,6 +38,31 @@ function retryDelayMs(res, attempt) {
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+/** An env switch is on unless unset or "", "0", "false", "no". */
+function envFlag(name) {
+  const v = process.env[name];
+  return !!v && !/^(0|false|no)$/i.test(v.trim());
+}
+
+// POSTs that only read: getSchedule (free-busy) is a lookup with a body.
+const READ_ONLY_POSTS = /\/getSchedule$/i;
+
+/**
+ * Process-wide brake, enforced here so no command -- or helper script that
+ * imports call() -- can forget it: OUTLOOK_READ_ONLY refuses every request
+ * that could change a mailbox. Meant for dry runs of automation.
+ */
+function assertWriteAllowed(method, path) {
+  if (method === 'GET' || !envFlag('OUTLOOK_READ_ONLY')) return;
+  const route = path.split('?')[0];
+  if (method === 'POST' && READ_ONLY_POSTS.test(route)) return;
+  throw new AppError({
+    code: E.PRECONDITION,
+    message: `Refusing ${method} ${route}: OUTLOOK_READ_ONLY is set.`,
+    hint: 'Unset OUTLOOK_READ_ONLY to allow changes, or preview with --dry-run.',
+  });
+}
+
 function networkError(cause, url) {
   const detail =
     cause?.name === 'TimeoutError'
@@ -83,6 +108,7 @@ export async function call(auth, path, init = {}) {
   const base = mailbox ? mailboxBase(mailbox) : resourceBase(key);
   const url = `${base}${path}`;
   const method = fetchInit.method ?? 'GET';
+  assertWriteAllowed(method, path);
   const headers = mailbox ? anchorHeaders(auth, mailbox) : auth;
 
   for (let attempt = 0; ; attempt++) {

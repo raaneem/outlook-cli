@@ -115,6 +115,7 @@ src/
   calendar.mjs   # calendar time parsing, calendarView URL, event filters
   resources.mjs  # registry of Microsoft resources (outlook/graph/substrate): base URL, audiences, classification
   mailbox.mjs    # --mailbox: shared-mailbox routing (/users/{smtp} base + anchor header)
+  actions.mjs    # batch runner for message-changing commands: id parsing, preflight, per-message results
   audit.mjs      # token-audit: decode cached tokens + group scopes into capability areas (offline)
   learn.mjs      # persistent learnings (load/add/forget/clear)
   jwt.mjs        # tiny JWT payload decoder (no signature validation)
@@ -153,8 +154,13 @@ slows down every command).
   constants in `errors.mjs`) and an actionable `hint`. Map new failure modes
   to a code and add it to the table in `docs/troubleshooting.md`.
 - **Exit codes follow `EXIT.*`** in `errors.mjs`: 0 OK, 1 generic, 2 auth, 3
-  HTTP/network, 64 usage, 130 SIGINT. Don't invent new ones without updating
+  HTTP/network, 4 precondition (mailbox not in the required state; nothing
+  changed), 64 usage, 130 SIGINT. Don't invent new ones without updating
   the docs.
+- **Message-changing commands go through `runMessageBatch`** (`actions.mjs`):
+  preflight every id, write nothing if any is missing, `--dry-run` sends
+  only GETs, one JSON result with per-message status. Don't hand-roll a
+  write loop for a new verb.
 - **Recovery is automatic where safe.** A 401 clears the cache, recaptures
   once, and retries; 429/503 retry with `Retry-After` backoff; network
   errors retry GETs only. Don't add per-command retry loops on top of this.

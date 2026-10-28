@@ -21,6 +21,7 @@ Environment variables:
 | `OUTLOOK_TOKEN_CACHE=/path` | Override the cached-headers JSON file |
 | `OUTLOOK_HTTP_TIMEOUT_MS=n` | Per-request timeout (default 30000) |
 | `OUTLOOK_NO_CAPTURE=1` | Never launch Chromium; fail with `E_AUTH_REQUIRED` instead (CI, headless boxes) |
+| `OUTLOOK_READ_ONLY=1` | Refuse every request that could change a mailbox (exit 4, `E_PRECONDITION`); reads still work. For dry runs of automation |
 | `OUTLOOK_GRAPH_BASE=/url` | Override the Microsoft Graph base URL |
 | `OUTLOOK_TOKEN_CACHE_GRAPH=/path` | Override the Graph token cache file (`_SUBSTRATE` also works) |
 | `XDG_DATA_HOME` / `XDG_CACHE_HOME` | Standard XDG roots |
@@ -257,6 +258,52 @@ List mail folders (Inbox, Sent Items, Drafts, custom folders…).
 outlook folders | jq '.value[] | {DisplayName, UnreadItemCount}'
 ```
 
+## Organising mail
+
+Commands that change existing messages share one contract:
+
+- **Ids** come as arguments or on STDIN — a JSON array, or one per line, so
+  `outlook list … | jq -r '.value[].Id' | outlook mark-read` works. Up to
+  100 per call; duplicates are dropped.
+- **Preflight first.** Every id is read from the target mailbox before
+  anything changes. If any id is missing (deleted, moved, or from another
+  mailbox), **nothing is written** and the command exits 4.
+- **`--dry-run`** does all the reads and planning and sends no writes.
+- **Already done = skipped**, so re-running a command is safe.
+- **One JSON result** on stdout, even on failure:
+
+```json
+{
+  "ok": true, "command": "mark-read", "mode": "apply", "mailbox": null,
+  "aborted": false,
+  "counts": { "requested": 2, "changed": 1, "wouldChange": 0, "skipped": 1,
+              "notFound": 0, "failed": 0, "notRun": 0 },
+  "items": [
+    { "id": "AAMk…", "subject": "…", "status": "changed",
+      "before": { "isRead": false }, "after": { "isRead": true } },
+    { "id": "AAMk…", "subject": "…", "status": "skipped", "reason": "already-read" }
+  ]
+}
+```
+
+Item `status` is one of `changed`, `would-change` (dry run), `skipped`,
+`not-found`, `failed`, `not-run`. Failed and missing items carry an
+`error` with `code`, `status`, `serverCode` (e.g. `ErrorItemNotFound`),
+`message`, `hint`. Exit codes: 0 when everything changed or was skipped;
+4 when preflight found missing ids (nothing changed); otherwise the first
+failure's code (3 for an HTTP error, with the other messages still
+processed).
+
+### `outlook mark-read <ids…>` / `outlook mark-unread <ids…>`
+
+```bash
+outlook mark-read "$ID"
+outlook unread --from noreply@example.com | jq -r '.value[].Id' | outlook mark-read --dry-run
+outlook --mailbox shared@example.com mark-unread "$ID"
+```
+
+In a shared mailbox, read state is shared by everyone who uses it.
+
 ### `outlook draft [json]`
 
 Create a **new draft** message. Same JSON shape as `send` but the message
@@ -468,6 +515,7 @@ true }`.
 | 1 | `EXIT.GENERAL` | Generic / unexpected error |
 | 2 | `EXIT.AUTH` | `E_AUTH_REQUIRED` or `E_AUTH_BLOCKED` |
 | 3 | `EXIT.HTTP` | `E_HTTP` (4xx/5xx from the API) |
+| 4 | `EXIT.PRECONDITION` | `E_PRECONDITION` — the mailbox isn't in the state the command needs (id not found there, draft changed since preview, writes disabled). Nothing was changed |
 | 64 | `EXIT.USAGE` | `E_ARGS` (bad input) |
 | 130 | `EXIT.SIGINT` | Interrupted with Ctrl-C |
 
