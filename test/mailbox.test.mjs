@@ -208,6 +208,17 @@ test('graph --resource outlook honours --mailbox', async () => {
   }
 });
 
+test('context reports the --mailbox target separately from the signed-in user', async () => {
+  const cache = seedTokenCache({ claims: { upn: 'me@example.com' } });
+  const own = JSON.parse((await runCli(['context'], { env: { OUTLOOK_TOKEN_CACHE: cache } })).stdout);
+  const shared = JSON.parse(
+    (await runCli(['--mailbox', SHARED, 'context'], { env: { OUTLOOK_TOKEN_CACHE: cache } })).stdout,
+  );
+  assert.equal(own.mailbox, null);
+  assert.equal(shared.mailbox, SHARED);
+  assert.equal(shared.user.email, 'me@example.com');
+});
+
 test('an invalid --mailbox exits 64 before any request', async () => {
   const mock = await recordingMock();
   try {

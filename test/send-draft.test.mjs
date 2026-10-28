@@ -9,6 +9,7 @@ import { strict as assert } from 'node:assert';
 
 import { runCli, seedTokenCache, startFakeMailbox } from './helpers.mjs';
 import { draftPreview, assertSendable } from '../src/send-draft.mjs';
+import { call } from '../src/client.mjs';
 import { AppError, E } from '../src/errors.mjs';
 
 const SHARED = 'shared@example.com';
@@ -83,6 +84,28 @@ test('assertSendable refuses with E_PRECONDITION, never sends a non-draft', () =
   assert.throws(() => assertSendable(received, ok), isPrecondition);
   assert.throws(() => assertSendable(draft, { ...ok, expectChangeKey: 'CK-OLD' }), isPrecondition);
   assert.throws(() => assertSendable(draft, { ...ok, draftsFolderId: undefined }), isPrecondition);
+});
+
+test('the brakes in call() hold for any method casing', async () => {
+  // Helper scripts import call() directly and may pass lower-case verbs;
+  // fetch accepts them, so the brakes must too. Refusal happens before any
+  // request, so no server is needed.
+  const isPrecondition = (e) => e instanceof AppError && e.code === E.PRECONDITION;
+  const keys = ['OUTLOOK_NO_SEND', 'OUTLOOK_READ_ONLY'];
+  const saved = Object.fromEntries(keys.map((k) => [k, process.env[k]]));
+  try {
+    process.env.OUTLOOK_NO_SEND = '1';
+    await assert.rejects(call({}, '/messages/D1/send', { method: 'post' }), isPrecondition);
+    await assert.rejects(call({}, '/sendMail', { method: 'PUT' }), isPrecondition);
+    delete process.env.OUTLOOK_NO_SEND;
+    process.env.OUTLOOK_READ_ONLY = 'true';
+    await assert.rejects(call({}, '/messages/D1', { method: 'patch' }), isPrecondition);
+  } finally {
+    for (const k of keys) {
+      if (saved[k] === undefined) delete process.env[k];
+      else process.env[k] = saved[k];
+    }
+  }
 });
 
 // ---------------------------------------------------------------------------

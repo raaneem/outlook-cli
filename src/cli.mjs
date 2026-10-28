@@ -535,6 +535,9 @@ program
 
     printJson({
       user,
+      // `user` is who is signed in; with --mailbox, commands act on this
+      // mailbox instead. Reported so an agent never conflates the two.
+      mailbox: activeMailbox,
       tokenMinutesUntilExpiry,
       learnings: loadLearnings(),
       learningsFile: learningsFile(),

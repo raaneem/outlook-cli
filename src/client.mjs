@@ -57,19 +57,21 @@ const SEND_ROUTES = /\/(send|sendmail)$/i;
  * can organise mail but never send it.
  */
 function assertWriteAllowed(method, path) {
-  if (method === 'GET') return;
+  // fetch accepts any casing, so the brakes must too.
+  const verb = String(method).toUpperCase();
+  if (verb === 'GET') return;
   const route = path.split('?')[0];
-  if (envFlag('OUTLOOK_READ_ONLY') && !(method === 'POST' && READ_ONLY_POSTS.test(route))) {
+  if (envFlag('OUTLOOK_READ_ONLY') && !(verb === 'POST' && READ_ONLY_POSTS.test(route))) {
     throw new AppError({
       code: E.PRECONDITION,
-      message: `Refusing ${method} ${route}: OUTLOOK_READ_ONLY is set.`,
+      message: `Refusing ${verb} ${route}: OUTLOOK_READ_ONLY is set.`,
       hint: 'Unset OUTLOOK_READ_ONLY to allow changes, or preview with --dry-run.',
     });
   }
-  if (envFlag('OUTLOOK_NO_SEND') && method === 'POST' && SEND_ROUTES.test(route)) {
+  if (envFlag('OUTLOOK_NO_SEND') && SEND_ROUTES.test(route)) {
     throw new AppError({
       code: E.PRECONDITION,
-      message: `Refusing to send mail (POST ${route}): OUTLOOK_NO_SEND is set.`,
+      message: `Refusing to send mail (${verb} ${route}): OUTLOOK_NO_SEND is set.`,
       hint: 'Unset OUTLOOK_NO_SEND to allow sending. Drafts can still be created.',
     });
   }

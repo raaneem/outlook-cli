@@ -102,7 +102,12 @@ export function saveAuth(headers, res = DEFAULT_RESOURCE) {
     JSON.stringify({ headers, expiresAt: exp, savedAt: Date.now() }, null, 2),
     { mode: 0o600 },
   );
-  chmodSync(file, 0o600);
+  try {
+    chmodSync(file, 0o600);
+  } catch (e) {
+    // e.g. a cache file owned by another user: still usable, but say so.
+    info(`Warning: could not make ${file} owner-only (${e.code ?? e.message}); it may be readable by others.`);
+  }
 }
 
 export function clearAuth(res = DEFAULT_RESOURCE) {

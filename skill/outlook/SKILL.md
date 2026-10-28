@@ -20,6 +20,7 @@ session. It's free (no network, no Chromium) and returns:
 ```json
 {
   "user": { "email": "…", "name": "…", "tenant_id": "…" },
+  "mailbox": null,
   "tokenMinutesUntilExpiry": 1408,
   "learnings": [
     "2026-05-18 | Signs off as Sam",
@@ -30,7 +31,9 @@ session. It's free (no network, no Chromium) and returns:
 }
 ```
 
-Use `user.email` to know whose mailbox you're acting on. Use `learnings`
+`user.email` is who is signed in. `mailbox` is null unless you passed
+`--mailbox`, in which case commands act on *that* mailbox, not the user's
+own — run `outlook --mailbox <address> context` to confirm. Use `learnings`
 to adapt your tone, recipient resolution, and default behaviour to what
 the user has shown they prefer.
 
