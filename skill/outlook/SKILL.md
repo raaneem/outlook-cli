@@ -79,6 +79,8 @@ outlook mark-unread <id…> [--dry-run]       # mark messages unread
 outlook archive     <id…> [--dry-run]       # move to the Archive folder
 outlook move        <id…> --to <folder> [--dry-run]   # Inbox / Deleted / "Inbox/Projects" / folder Id
 outlook folders [--parent <folder>]         # list folders (or subfolders) to find a --to target
+outlook categories                          # the mailbox's master category names
+outlook categorize  <id…> --add <name> [--remove <name>] [--dry-run]   # or --set <name>… / --clear
 
 # Drafting (review-first — preferred for AI-generated mail)
 outlook draft             <json>  [--attach <path>…]   # new draft (reads STDIN if no arg)
@@ -264,6 +266,25 @@ outlook move "$ID" --to "Inbox/Projects"      # folder path, case-insensitive
   message is touched; run `outlook folders [--parent X]` to find names.
 - There is no hard delete. "Delete" means `move --to Deleted`; confirm with
   the user first.
+
+### Categorising
+
+```bash
+outlook categories                                       # names the mailbox knows
+outlook categorize "$ID" --add "For information"
+outlook categorize "$ID" --remove "In progress" --add "Done"
+outlook categorize "$ID" --set "Done"                    # replace the whole list
+```
+
+- Names must be in the mailbox's master list (`outlook categories`). They
+  match case-insensitively and are written in the list's exact spelling.
+  An unknown name fails with exit 64 and lists the known ones — pick from
+  that list or ask the user; **don't pass `--allow-unlisted` unless the
+  user explicitly wants a new category.**
+- Each shared mailbox has its own master list. Run `categories` with the
+  same `--mailbox`.
+- `--add` keeps existing categories; `--set` replaces them all. Use `--set`
+  only when the user wants exactly that list.
 
 ## Drafting mail (review-first — STRONGLY PREFERRED)
 

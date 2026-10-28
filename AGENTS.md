@@ -117,6 +117,7 @@ src/
   mailbox.mjs    # --mailbox: shared-mailbox routing (/users/{smtp} base + anchor header)
   actions.mjs    # batch runner for message-changing commands: id parsing, preflight, per-message results
   folders.mjs    # move/archive destinations: well-known names, folder paths, Ids
+  categories.mjs # categorize: master-list validation, canonical spelling, add/remove/set/clear
   audit.mjs      # token-audit: decode cached tokens + group scopes into capability areas (offline)
   learn.mjs      # persistent learnings (load/add/forget/clear)
   jwt.mjs        # tiny JWT payload decoder (no signature validation)

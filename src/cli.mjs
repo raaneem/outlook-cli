@@ -29,6 +29,13 @@ import { RESOURCES } from './resources.mjs';
 import { parseMailbox } from './mailbox.mjs';
 import { parseMessageIds, runMessageBatch } from './actions.mjs';
 import { resolveDestination } from './folders.mjs';
+import {
+  parseCategoryChange,
+  loadMasterCategories,
+  resolveCategoryNames,
+  applyCategoryChange,
+  sameCategories,
+} from './categories.mjs';
 import { auditAll } from './audit.mjs';
 import {
   resolveEventRange,
@@ -49,8 +56,8 @@ import {
   validateAttachPath,
 } from './attachments.mjs';
 
-/** Commander collector for repeated --attach options. */
-function collectAttach(value, previous) {
+/** Commander collector for repeatable options (--attach, --add, --remove, --set). */
+function collect(value, previous) {
   return previous ? previous.concat([value]) : [value];
 }
 
@@ -1010,6 +1017,66 @@ program
   )
   .action((args, opts) => moveMessages('archive', args, 'archive', opts));
 
+program
+  .command('categories')
+  .description("List the mailbox's master categories: the names `categorize` accepts.")
+  .action(async () => {
+    printJson(await runApi('/MasterCategories'));
+  });
+
+program
+  .command('categorize')
+  .argument('[ids...]', IDS_HELP)
+  .option('--add <name>', 'add a category, keeping existing ones (repeatable)', collect)
+  .option('--remove <name>', 'remove a category, matched case-insensitively (repeatable)', collect)
+  .option('--set <name>', 'replace all categories with these (repeatable)', collect)
+  .option('--clear', 'remove every category')
+  .option('--allow-unlisted', "accept --add/--set names that are not in the mailbox's master list")
+  .option('--dry-run', DRY_RUN_HELP)
+  .description(
+    'Add, remove, or replace Outlook categories on messages. --add/--set names\n' +
+      "must be in the mailbox's master list (`outlook categories`) and are written\n" +
+      'in its exact spelling; unknown names are refused unless --allow-unlisted.',
+  )
+  .action(async (args, opts) => {
+    const change = parseCategoryChange(opts);
+    const ids = parseMessageIds(args, await idsInput(args));
+    const where = activeMailbox ?? 'your mailbox';
+    // Only names being written need the master list; removing and clearing
+    // work even where the list cannot be read.
+    const writesNames = change.add.length > 0 || (change.set?.length ?? 0) > 0;
+    const master =
+      opts.allowUnlisted || !writesNames ? null : await loadMasterCategories(runApi, where);
+    const resolved = resolveCategoryNames(change, master, where);
+    const result = await runMessageBatch({
+      command: 'categorize',
+      ids,
+      mailbox: activeMailbox,
+      dryRun: !!opts.dryRun,
+      extra: { change: resolved },
+      load: (id) => runApi(`${messagePath(id)}?$select=Id,Subject,Categories`),
+      plan: (message, id) => {
+        const before = message.Categories ?? [];
+        const after = applyCategoryChange(before, resolved);
+        if (sameCategories(before, after)) return { skip: 'no-change' };
+        return {
+          before: { categories: before },
+          after: { categories: after },
+          // PATCH replaces the whole list; add/remove were computed above
+          // from the preflight read.
+          apply: async () => {
+            await runApi(messagePath(id), {
+              method: 'PATCH',
+              headers: JSON_HEADERS,
+              body: JSON.stringify({ Categories: after }),
+            });
+          },
+        };
+      },
+    });
+    finishBatch(result);
+  });
+
 /** Where a new draft went -- with --mailbox it is the shared mailbox's Drafts. */
 function draftSavedMessage() {
   return activeMailbox
@@ -1107,7 +1174,7 @@ async function makeDraftFrom(messageId, action, overridesJson, attachPaths = [])
 program
   .command('draft')
   .argument('[json]', 'Outlook Message JSON; reads STDIN if omitted')
-  .option('-a, --attach <path>', 'attach a local file (repeatable, ≤3MB each)', collectAttach)
+  .option('-a, --attach <path>', 'attach a local file (repeatable, ≤3MB each)', collect)
   .description(
     'Create a new draft (does NOT send). Same JSON shape as `send`. The\n' +
       'draft appears in your Drafts folder for review.',
@@ -1144,7 +1211,7 @@ program
     '[json]',
     'partial Message override (e.g. {"Body":{"ContentType":"Text","Content":"…"}}); reads STDIN if omitted',
   )
-  .option('-a, --attach <path>', 'attach a local file (repeatable, ≤3MB each)', collectAttach)
+  .option('-a, --attach <path>', 'attach a local file (repeatable, ≤3MB each)', collect)
   .description(
     'Create a draft reply to a message. Outlook automatically fills in the\n' +
       'quoted thread; your override JSON sets the new body or extra recipients.',
@@ -1158,7 +1225,7 @@ program
   .command('draft-reply-all')
   .argument('<id>', 'message Id to reply-all to')
   .argument('[json]', 'partial Message override; STDIN if omitted')
-  .option('-a, --attach <path>', 'attach a local file (repeatable, ≤3MB each)', collectAttach)
+  .option('-a, --attach <path>', 'attach a local file (repeatable, ≤3MB each)', collect)
   .description('Like `draft-reply`, but addresses everyone on the original thread.')
   .action(async (id, jsonArg, opts) => {
     const raw = jsonArg ?? (process.stdin.isTTY ? '' : await readStdin());
@@ -1169,7 +1236,7 @@ program
   .command('draft-forward')
   .argument('<id>', 'message Id to forward')
   .argument('[json]', 'partial Message override (typically ToRecipients + Body); STDIN if omitted')
-  .option('-a, --attach <path>', 'attach a local file (repeatable, ≤3MB each)', collectAttach)
+  .option('-a, --attach <path>', 'attach a local file (repeatable, ≤3MB each)', collect)
   .description('Create a draft forward of a message.')
   .action(async (id, jsonArg, opts) => {
     const raw = jsonArg ?? (process.stdin.isTTY ? '' : await readStdin());
@@ -1193,7 +1260,7 @@ program
     '[json]',
     'message JSON (Outlook REST "Message" resource); reads STDIN if omitted',
   )
-  .option('-a, --attach <path>', 'attach a local file (repeatable, ≤3MB each)', collectAttach)
+  .option('-a, --attach <path>', 'attach a local file (repeatable, ≤3MB each)', collect)
   .description(
     'Send a message.\n' +
       'Example STDIN payload:\n' +

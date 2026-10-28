@@ -332,6 +332,39 @@ outlook --mailbox shared@example.com archive "$ID" --dry-run
 The result adds `destination: { id, displayName, wellKnownName }`, and
 each item's `before` / `after` carry `folderId`.
 
+### `outlook categories`
+
+List the mailbox's master categories — the names `categorize` accepts.
+
+```bash
+outlook --mailbox shared@example.com categories | jq -r '.value[].DisplayName'
+```
+
+### `outlook categorize <ids…> (--add <name>… --remove <name>… | --set <name>… | --clear)`
+
+```bash
+outlook categorize "$ID" --add "For information"
+outlook categorize "$ID" --remove "In progress" --add "Done"
+outlook categorize "$ID" --set "Done"                 # replace the whole list
+outlook categorize "$ID" --clear
+outlook --mailbox shared@example.com categorize "$ID1" "$ID2" --add "In progress" --dry-run
+```
+
+- `--add` / `--set` names must exist in the mailbox's **master category
+  list**; they're matched case-insensitively and written in the list's
+  exact spelling (`for information` → `For information`). Exchange would
+  otherwise store any typo as a new uncoloured category. Unknown names exit
+  64 before any message is read, listing the known ones. `--allow-unlisted`
+  skips the check and writes names as typed.
+- `--remove` matches the message's own categories case-insensitively, so it
+  can clean up names that were never in the master list.
+- `--add` and `--remove` combine; `--set` and `--clear` stand alone.
+  Repeat a flag for several names.
+- Messages that would end up unchanged are skipped.
+
+The result adds `change: { add, remove, set, clear }` (with canonical
+names), and each item's `before` / `after` carry `categories`.
+
 ### `outlook draft [json]`
 
 Create a **new draft** message. Same JSON shape as `send` but the message
