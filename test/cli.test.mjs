@@ -23,7 +23,7 @@ test('--version prints semver to stdout, exits 0', async () => {
 test('--help lists all commands', async () => {
   const { code, stdout } = await runCli(['--help']);
   assert.equal(code, 0);
-  for (const cmd of ['auth', 'refresh', 'logout', 'list', 'search', 'read', 'folders', 'send', 'mark-read', 'mark-unread']) {
+  for (const cmd of ['auth', 'refresh', 'logout', 'list', 'search', 'read', 'folders', 'send', 'mark-read', 'mark-unread', 'move', 'archive']) {
     assert.match(stdout, new RegExp(`^\\s*${cmd}\\b`, 'm'), `expected to see "${cmd}" in help`);
   }
 });
@@ -109,7 +109,7 @@ test('search url-encodes the query and respects --top', async () => {
   }
 });
 
-test('folders calls /mailfolders', async () => {
+test('folders calls /mailfolders with a page size larger than the server default', async () => {
   let observedPath = null;
   const mock = await startMockServer((req, res) => {
     observedPath = req.url;
@@ -125,7 +125,7 @@ test('folders calls /mailfolders', async () => {
       },
     });
     assert.equal(code, 0);
-    assert.equal(observedPath, '/api/v2.0/me/mailfolders');
+    assert.equal(observedPath, '/api/v2.0/me/mailfolders?$top=100');
     assert.equal(JSON.parse(stdout).value[0].DisplayName, 'Inbox');
   } finally {
     await mock.close();

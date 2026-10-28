@@ -13,4 +13,5 @@ If `$ARGUMENTS` has extra context (`from <person>`, `since <time>`,
 before running.
 
 After the summary, offer next actions: open one of the messages
-(`outlook read <id>`), reply, or archive.
+(`outlook read <id>`), reply, mark read (`outlook mark-read <id…>`), or
+archive (`outlook archive <id…>`). Only change the messages the user picks.

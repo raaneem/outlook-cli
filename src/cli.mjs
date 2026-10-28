@@ -28,6 +28,7 @@ import { buildFilter, buildQuery, resolveFolder, parseCount } from './odata.mjs'
 import { RESOURCES } from './resources.mjs';
 import { parseMailbox } from './mailbox.mjs';
 import { parseMessageIds, runMessageBatch } from './actions.mjs';
+import { resolveDestination } from './folders.mjs';
 import { auditAll } from './audit.mjs';
 import {
   resolveEventRange,
@@ -850,9 +851,19 @@ program
 
 program
   .command('folders')
-  .description('List mail folders.')
-  .action(async () => {
-    const body = await runApi('/mailfolders');
+  .description('List mail folders: the top level, or the subfolders of --parent.')
+  // Without $top the server returns only its default page of 10, which
+  // silently hides folders in larger (often shared) mailboxes.
+  .option('-n, --top <count>', 'how many folders to fetch', '100')
+  .option('-s, --skip <count>', 'pagination offset')
+  .option('--parent <folder>', 'list subfolders of this folder: a name, a path like "Inbox/Projects", or an Id')
+  .action(async (opts) => {
+    let base = '/mailfolders';
+    if (opts.parent) {
+      const parent = await resolveDestination(runApi, opts.parent, { mailbox: activeMailbox });
+      base = `/mailfolders/${encodeURIComponent(parent.id)}/childfolders`;
+    }
+    const body = await runApi(base + buildQuery({ top: opts.top, skip: opts.skip }));
     printJson(body);
   });
 
@@ -939,6 +950,65 @@ for (const [name, isRead] of [
       finishBatch(result);
     });
 }
+
+/**
+ * Shared body of `move` and `archive`. The destination is resolved before
+ * preflight, so an unknown folder fails before any message is read.
+ */
+async function moveMessages(command, args, spec, opts) {
+  const ids = parseMessageIds(args, await idsInput(args));
+  const destination = await resolveDestination(runApi, spec, { mailbox: activeMailbox });
+  const result = await runMessageBatch({
+    command,
+    ids,
+    mailbox: activeMailbox,
+    dryRun: !!opts.dryRun,
+    extra: { destination },
+    load: (id) => runApi(`${messagePath(id)}?$select=Id,Subject,ParentFolderId`),
+    plan: (message, id) =>
+      message.ParentFolderId === destination.id
+        ? { skip: 'already-in-destination' }
+        : {
+            before: { folderId: message.ParentFolderId ?? null },
+            after: { folderId: destination.id },
+            // Ids are not immutable here: the moved message has a new Id,
+            // and the old one stops working (LEARNINGS.md section 16).
+            apply: async () => {
+              const moved = await runApi(`${messagePath(id)}/move`, {
+                method: 'POST',
+                headers: JSON_HEADERS,
+                body: JSON.stringify({ DestinationId: destination.id }),
+              });
+              return { newId: moved?.Id ?? null };
+            },
+          },
+  });
+  finishBatch(result);
+}
+
+program
+  .command('move')
+  .argument('[ids...]', IDS_HELP)
+  .requiredOption(
+    '--to <folder>',
+    'destination: Inbox, Archive, Deleted, Junk, … , a path like "Inbox/Projects", or a folder Id',
+  )
+  .option('--dry-run', DRY_RUN_HELP)
+  .description(
+    'Move messages to another folder. A moved message gets a NEW Id (returned\n' +
+      'as `newId`); the old Id stops working. Messages already there are skipped.',
+  )
+  .action((args, opts) => moveMessages('move', args, opts.to, opts));
+
+program
+  .command('archive')
+  .argument('[ids...]', IDS_HELP)
+  .option('--dry-run', DRY_RUN_HELP)
+  .description(
+    "Move messages to the mailbox's Archive folder (what OWA's Archive button\n" +
+      'does; not the online-archive mailbox). Same output as `move`.',
+  )
+  .action((args, opts) => moveMessages('archive', args, 'archive', opts));
 
 /** Where a new draft went -- with --mailbox it is the shared mailbox's Drafts. */
 function draftSavedMessage() {

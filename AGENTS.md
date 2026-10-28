@@ -116,6 +116,7 @@ src/
   resources.mjs  # registry of Microsoft resources (outlook/graph/substrate): base URL, audiences, classification
   mailbox.mjs    # --mailbox: shared-mailbox routing (/users/{smtp} base + anchor header)
   actions.mjs    # batch runner for message-changing commands: id parsing, preflight, per-message results
+  folders.mjs    # move/archive destinations: well-known names, folder paths, Ids
   audit.mjs      # token-audit: decode cached tokens + group scopes into capability areas (offline)
   learn.mjs      # persistent learnings (load/add/forget/clear)
   jwt.mjs        # tiny JWT payload decoder (no signature validation)

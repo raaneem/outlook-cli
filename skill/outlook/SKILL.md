@@ -76,6 +76,9 @@ outlook folders                       # list mail folders
 # Organising (ids as args or STDIN; preflight first; --dry-run previews; JSON result)
 outlook mark-read   <id…> [--dry-run]       # mark messages read
 outlook mark-unread <id…> [--dry-run]       # mark messages unread
+outlook archive     <id…> [--dry-run]       # move to the Archive folder
+outlook move        <id…> --to <folder> [--dry-run]   # Inbox / Deleted / "Inbox/Projects" / folder Id
+outlook folders [--parent <folder>]         # list folders (or subfolders) to find a --to target
 
 # Drafting (review-first — preferred for AI-generated mail)
 outlook draft             <json>  [--attach <path>…]   # new draft (reads STDIN if no arg)
@@ -244,6 +247,23 @@ outlook unread --from noreply@example.com | jq -r '.value[].Id' | outlook mark-r
   user. Don't retry the whole batch blindly — already-done messages are
   skipped, so re-running only what failed is safe.
 - Only change messages the user asked you to change.
+
+### Moving and archiving
+
+```bash
+outlook archive "$ID"                         # what OWA's Archive button does
+outlook move "$ID" --to Deleted               # soft delete into Deleted Items
+outlook move "$ID" --to "Inbox/Projects"      # folder path, case-insensitive
+```
+
+- **A moved message gets a new Id** (`items[].newId`). The old Id is dead —
+  use `newId` for anything after the move, and do mark-read / categorize
+  *before* moving.
+- `--to` takes a well-known name, a folder path from the top level, or a
+  folder Id. An unknown or ambiguous folder fails (exit 64) before any
+  message is touched; run `outlook folders [--parent X]` to find names.
+- There is no hard delete. "Delete" means `move --to Deleted`; confirm with
+  the user first.
 
 ## Drafting mail (review-first — STRONGLY PREFERRED)
 

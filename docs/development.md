@@ -25,6 +25,7 @@ adds `outlook` to your `$PATH`.
 | `src/resources.mjs` | Microsoft resource registry (outlook/graph/substrate): base URLs, audiences, token classification |
 | `src/mailbox.mjs` | `--mailbox` shared-mailbox routing: `/users/{smtp}` base, anchor header, address validation |
 | `src/actions.mjs` | Batch runner for message-changing commands (`mark-read`, `move`, `categorize`, …): id parsing, preflight, per-message results |
+| `src/folders.mjs` | Destination folders for `move` / `archive`: well-known names (by role, not display name), folder paths, Ids |
 | `src/audit.mjs` | `token-audit` — decode cached tokens + group scopes into capability areas (offline) |
 | `src/odata.mjs` | Mail filter / query builders (`--unread`, `--from`, `--folder`, …) |
 | `src/calendar.mjs` | Calendar time parsing, calendarView URL builder, event filters |

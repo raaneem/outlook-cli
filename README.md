@@ -30,7 +30,7 @@ $ outlook list -n 3 | jq '.value[] | {From: .From.EmailAddress.Name, Subject}'
 | --- | --- | --- |
 | **Mail — read** | `list`, `unread`, `search`, `read`, `folders` | Friendly filters (`--unread`, `--from`, `--since 7d`, `--folder Sent`, `--has-attachments`, …) or raw OData |
 | **Mail — write** | `draft`, `draft-reply`, `draft-reply-all`, `draft-forward`, `discard-draft`, `send` | Review-first drafts preferred over direct `send`; `--attach` files (≤3 MB) |
-| **Mail — organise** | `mark-read`, `mark-unread` | Batch ids (args or STDIN), preflight before any write, `--dry-run`, one JSON result per call |
+| **Mail — organise** | `mark-read`, `mark-unread`, `move`, `archive` | Batch ids (args or STDIN), preflight before any write, `--dry-run`, one JSON result per call |
 | **Calendar** | `agenda`, `events`, `event-read`, `calendars`, `event-create`, `event-update`, `event-cancel`, `accept`/`decline`/`tentative`, `free-busy` | Natural time ranges (`today`, `+7d`, `--days 14`); RSVP; availability lookup |
 | **Shared mailboxes** | `--mailbox <address>` on any mail / calendar command | Uses your delegated access (Full Access, Send As) with the same token — see [`docs/usage.md`](./docs/usage.md#shared-mailboxes---mailbox) |
 | **Teams** (via Graph) | `teams`, `teams-channels`, `teams-chats`, `teams-members`, `teams-messages`, `teams-send` | Needs `outlook auth --all`. Listing + sending work; reading message bodies needs `Chat.Read` (may be tenant-blocked) |

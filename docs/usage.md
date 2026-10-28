@@ -252,10 +252,13 @@ outlook read "$MSG" | jq '.Body.Content' -r
 
 ### `outlook folders`
 
-List mail folders (Inbox, Sent Items, Drafts, custom folders…).
+List mail folders (Inbox, Sent Items, Drafts, custom folders…): the top
+level by default (up to `-n 100`, page with `-s`), or the subfolders of
+`--parent <folder>` (a name, a path like `Inbox/Projects`, or an Id).
 
 ```bash
 outlook folders | jq '.value[] | {DisplayName, UnreadItemCount}'
+outlook folders --parent Inbox | jq -r '.value[].DisplayName'
 ```
 
 ## Organising mail
@@ -303,6 +306,31 @@ outlook --mailbox shared@example.com mark-unread "$ID"
 ```
 
 In a shared mailbox, read state is shared by everyone who uses it.
+
+### `outlook move <ids…> --to <folder>` / `outlook archive <ids…>`
+
+```bash
+outlook archive "$ID"                                  # = move --to Archive
+outlook move "$ID" --to Deleted                        # soft delete (Deleted Items)
+outlook move "$ID" --to "Inbox/Projects/2026"          # folder path, case-insensitive
+outlook move "$ID" --to AAMkAD…                        # folder Id from `outlook folders`
+outlook --mailbox shared@example.com archive "$ID" --dry-run
+```
+
+- `--to` takes a well-known name (`Inbox`, `Archive`, `Deleted`, `Junk`,
+  `Sent`, `Drafts`, `Outbox`), a display-name path walked from the top
+  level (`Inbox/Projects`), or a folder Id. Well-known names are resolved
+  by role, not by display name, so they work in mailboxes set to other
+  languages. An unknown or ambiguous folder exits 64 before any message is
+  touched.
+- **A moved message gets a new Id**, returned per item as `newId`; the old
+  Id stops working. Do any `mark-read` / `categorize` first, then move.
+- `archive` uses the mailbox's Archive folder — what OWA's Archive button
+  does, not the online-archive mailbox. A mailbox without one exits 64.
+- Nothing is hard-deleted; `--to Deleted` moves to Deleted Items.
+
+The result adds `destination: { id, displayName, wellKnownName }`, and
+each item's `before` / `after` carry `folderId`.
 
 ### `outlook draft [json]`
 
