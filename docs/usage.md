@@ -8,6 +8,7 @@ machine-generated version.
 | Flag | Effect |
 | --- | --- |
 | `--debug` | Verbose diagnostics on stderr (`OUTLOOK_DEBUG=1`) |
+| `--mailbox <address>` | Act on a shared or delegated mailbox instead of your own (mail + calendar commands) — see [Shared mailboxes](#shared-mailboxes---mailbox) |
 | `-V`, `--version` | Print the CLI version |
 | `-h`, `--help` | Print help (works on any subcommand too) |
 
@@ -41,6 +42,32 @@ rarely surface:
   `E_NETWORK` (exit 3).
 - **Hung connections:** every request is bounded by
   `OUTLOOK_HTTP_TIMEOUT_MS` (default 30 s) — the CLI never hangs forever.
+
+## Shared mailboxes (`--mailbox`)
+
+Every mail and calendar command can act on a shared or delegated mailbox
+you have access to, addressed by its SMTP address:
+
+```bash
+outlook --mailbox shared@example.com list --folder Inbox -n 25
+outlook --mailbox shared@example.com read <id>
+outlook --mailbox shared@example.com draft-reply <id> '{"Body":{"ContentType":"Text","Content":"On it."}}'
+outlook list --mailbox shared@example.com     # the flag also works after the subcommand
+```
+
+- Requests go to `/users/{address}/…` instead of `/me/…` with the same
+  token — no extra sign-in, no new consent. Exchange checks *your*
+  permissions on that mailbox: Full Access to read and change it, Send As
+  or Send on Behalf to send from it.
+- **Message ids belong to the mailbox they came from.** Always pass the same
+  `--mailbox` you listed with. An id used against the wrong mailbox fails
+  with `ErrorInvalidMailboxItemId` instead of touching anything.
+- Drafts created with `--mailbox` land in the shared mailbox's Drafts
+  folder; the output's `Mailbox` field says which mailbox was used.
+- `send` with `--mailbox` sends **from the shared mailbox**.
+- Graph, Teams and Substrate commands refuse `--mailbox` (exit 64) rather
+  than silently acting on your own account. `graph --resource outlook`
+  honours it.
 
 ## Subcommands
 

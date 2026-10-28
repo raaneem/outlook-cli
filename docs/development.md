@@ -23,6 +23,7 @@ adds `outlook` to your `$PATH`.
 | `src/capture.mjs` | Playwright launcher + Bearer-header capture (lazy-imported) |
 | `src/client.mjs` | Pure-fetch `call()` wrapper, `OUTLOOK_API_BASE` override |
 | `src/resources.mjs` | Microsoft resource registry (outlook/graph/substrate): base URLs, audiences, token classification |
+| `src/mailbox.mjs` | `--mailbox` shared-mailbox routing: `/users/{smtp}` base, anchor header, address validation |
 | `src/audit.mjs` | `token-audit` — decode cached tokens + group scopes into capability areas (offline) |
 | `src/odata.mjs` | Mail filter / query builders (`--unread`, `--from`, `--folder`, …) |
 | `src/calendar.mjs` | Calendar time parsing, calendarView URL builder, event filters |

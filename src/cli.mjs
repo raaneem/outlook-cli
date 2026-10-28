@@ -25,6 +25,7 @@ import { printJson, info, errorBlock, debug } from './output.mjs';
 import { AppError, E, EXIT, exitCodeFor } from './errors.mjs';
 import { buildFilter, buildQuery, resolveFolder, parseCount } from './odata.mjs';
 import { RESOURCES } from './resources.mjs';
+import { parseMailbox } from './mailbox.mjs';
 import { auditAll } from './audit.mjs';
 import {
   resolveEventRange,
@@ -122,6 +123,11 @@ function httpError(res, method, path) {
   });
 }
 
+// The mailbox every Outlook call in this invocation targets: null for the
+// signed-in user's own (/me), or the SMTP address given via --mailbox. Set
+// once by the preAction hook, before any command runs.
+let activeMailbox = null;
+
 /**
  * Authenticated API call with automatic 401 recovery: if the cached token
  * is rejected server-side (revoked, CA policy change) we clear it, capture
@@ -132,18 +138,30 @@ function httpError(res, method, path) {
  * "outlook"). For non-default resources, getAuth() will not silently open
  * the browser — it errors with a `outlook auth --all` hint instead — so a
  * `graph` call never pops Chromium unexpectedly.
+ *
+ * Outlook calls go to --mailbox when one was given. Other resources refuse
+ * it up front, before any token lookup, so the error is about the flag
+ * rather than a missing Graph token.
  */
 async function runApi(path, init = {}) {
   const method = init.method ?? 'GET';
   const res_ = init.resource ?? 'outlook';
+  if (activeMailbox && res_ !== 'outlook') {
+    throw new AppError({
+      code: E.ARGS,
+      message: `--mailbox applies to Outlook mail and calendar only, not ${res_}.`,
+      hint: 'Drop --mailbox for Graph, Teams and Substrate commands.',
+    });
+  }
+  const callInit = activeMailbox ? { ...init, mailbox: activeMailbox } : init;
   let auth = await getAuth({ resource: res_ });
-  let res = await call(auth, path, init);
+  let res = await call(auth, path, callInit);
 
   if (res.status === 401) {
     debug(`cached ${res_} token rejected (401); recapturing and retrying`);
     clearAuth(res_);
     auth = await getAuth({ resource: res_ });
-    res = await call(auth, path, init);
+    res = await call(auth, path, callInit);
     if (res.status === 401) {
       clearAuth(res_);
       throw new AppError({
@@ -215,9 +233,18 @@ program
   )
   .version(pkg.version, '-V, --version', 'print the CLI version')
   .option('--debug', 'verbose diagnostic output to stderr')
+  .option(
+    '--mailbox <address>',
+    'act on a shared or delegated mailbox (SMTP address) instead of your own',
+  )
   .hook('preAction', (cmd) => {
-    if (cmd.optsWithGlobals().debug) process.env.OUTLOOK_DEBUG = '1';
+    const opts = cmd.optsWithGlobals();
+    if (opts.debug) process.env.OUTLOOK_DEBUG = '1';
+    // Commander accepts a root option before or after the subcommand, so
+    // `outlook --mailbox x list` and `outlook list --mailbox x` both land here.
+    activeMailbox = parseMailbox(opts.mailbox);
     debug(`outlook ${pkg.version}, node ${process.version}`);
+    if (activeMailbox) debug(`mailbox ${activeMailbox}`);
   });
 
 program
@@ -824,6 +851,13 @@ program
     printJson(body);
   });
 
+/** Where a new draft went -- with --mailbox it is the shared mailbox's Drafts. */
+function draftSavedMessage() {
+  return activeMailbox
+    ? `Draft saved to the Drafts folder of ${activeMailbox}. Open that mailbox in Outlook to review and send.`
+    : 'Draft saved to your Drafts folder. Open Outlook to review and send.';
+}
+
 /**
  * Common implementation for draft-* commands.
  *
@@ -906,7 +940,8 @@ async function makeDraftFrom(messageId, action, overridesJson, attachPaths = [])
     WebLink: draft.WebLink ?? null,
     ConversationId: draft.ConversationId ?? null,
     Attachments: attached,
-    message: 'Draft saved to your Drafts folder. Open Outlook to review and send.',
+    Mailbox: activeMailbox,
+    message: draftSavedMessage(),
   };
 }
 
@@ -938,7 +973,8 @@ program
       DraftId: body.Id,
       WebLink: body.WebLink ?? null,
       Attachments: attached,
-      message: 'Draft saved to your Drafts folder. Open Outlook to review and send.',
+      Mailbox: activeMailbox,
+      message: draftSavedMessage(),
     });
   });
 

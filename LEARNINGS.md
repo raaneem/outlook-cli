@@ -390,6 +390,50 @@ run, watching for the new tab-guidance message and confirming
 
 ---
 
+## 16. Shared mailboxes: message ids are bound to their mailbox
+
+**Context:** a triage bot reads the user's own mailbox plus two shared
+mailboxes through `--mailbox`. Its helper scripts moved and categorised
+shared mail by importing `auth.mjs` and hand-rolling REST calls.
+
+**Symptom:** every write against a shared mailbox failed with
+`ErrorInvalidMailboxItemId` ("Item Id doesn't belong to the current
+mailbox"), later also `ErrorIncorrectRoutingHint`. A day of fixes added
+retries over alternate routes (`/mailfolders/{parent}/messages/{id}`, the
+item's `@odata.id`, with and without the anchor header) plus a 500-message
+list scan per action to re-find each id.
+
+**Root cause:** the scripts set `process.env.OUTLOOK_MAILBOX` and called
+`client.call()` — but nothing reads that variable, so every write went to
+`/me` carrying an id from the shared mailbox. Exchange refused because **a
+message id encodes the mailbox it lives in**; it was never a routing flake.
+`ErrorIncorrectRoutingHint` was the in-between state: a `/users/{shared}`
+URL still sent with the user's own `PUID:` anchor. Building requests as
+`/users/{smtp}` with the anchor re-pointed made the whole cascade
+unnecessary.
+
+**Takeaways:**
+
+- `ErrorInvalidMailboxItemId` means *wrong mailbox*, not *try another
+  path*. Check `--mailbox` first.
+- The id binding is a safety net, not a guarantee: calls that take no id
+  (`send`, `draft`, listings) aimed at the wrong mailbox succeed silently.
+  Mailbox targeting must be an explicit, validated option that outputs
+  echo — never an ambient env var.
+- For a shared mailbox, `x-anchormailbox` must be **replaced**
+  (`SMTP:{smtp}`), in every spelling: two variants of the header are
+  comma-joined into one value Exchange cannot route.
+- The captured `prefer` header in the tested tenant is
+  `exchange.behavior="IncludeThirdPartyOnlineMeetingProviders"` — it does
+  **not** request `IdType="ImmutableId"`. Ids are therefore not stable: a
+  moved message gets a new Id (returned by `/move`). Never reuse the old one.
+- The OWA token already carries `Mail.ReadWrite.Shared`, `Mail.Send.Shared`
+  and `MailboxSettings.ReadWrite`. For shared mailboxes the gate is
+  Exchange's mailbox permissions (Full Access, Send As / Send on Behalf),
+  not token scopes — no consent problem (cf. §1–4).
+
+---
+
 ## Rules summarised
 
 1. Admin consent on `Mail.*` is a wall. There is no clever way around it.

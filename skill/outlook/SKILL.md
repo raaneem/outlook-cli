@@ -1,6 +1,6 @@
 ---
 name: outlook
-description: Read, search, triage, draft, and send mail PLUS view and manage calendar events through the user's Outlook / Microsoft 365 mailbox, PLUS list Microsoft Teams (teams, channels, chats, members) and post Teams chat messages via Graph. Use when the user asks to check inbox, summarise unread mail, find a specific email, draft a reply they can review, send mail, view their calendar / agenda, find what meetings they have today / this week, create or update calendar events, RSVP to invites, check free/busy, list their Teams / chats, or send a Teams message. Teams needs `outlook auth --all`; reading Teams message bodies may be blocked by tenant scope. Copilot is not supported (streaming protocol). Prefer drafts (`draft`, `draft-reply`, `draft-reply-all`, `draft-forward`) over direct send so the user can review in Outlook first. Confirm with the user before creating or cancelling events with attendees (invitations / cancellations send IMMEDIATELY). Requires the `outlook` CLI to be installed on the user's PATH; if it is not, tell the user and stop. All output is JSON to stdout; pipe through `jq` for transformation. This skill does NOT cover Gmail, IMAP, or other mail providers.
+description: Read, search, triage, draft, and send mail PLUS view and manage calendar events through the user's Outlook / Microsoft 365 mailbox, PLUS list Microsoft Teams (teams, channels, chats, members) and post Teams chat messages via Graph. Use when the user asks to check inbox, summarise unread mail, find a specific email, draft a reply they can review, send mail, view their calendar / agenda, find what meetings they have today / this week, create or update calendar events, RSVP to invites, check free/busy, list their Teams / chats, or send a Teams message. Works on shared / delegated mailboxes too via `--mailbox <address>`. Teams needs `outlook auth --all`; reading Teams message bodies may be blocked by tenant scope. Copilot is not supported (streaming protocol). Prefer drafts (`draft`, `draft-reply`, `draft-reply-all`, `draft-forward`) over direct send so the user can review in Outlook first. Confirm with the user before creating or cancelling events with attendees (invitations / cancellations send IMMEDIATELY). Requires the `outlook` CLI to be installed on the user's PATH; if it is not, tell the user and stop. All output is JSON to stdout; pipe through `jq` for transformation. This skill does NOT cover Gmail, IMAP, or other mail providers.
 ---
 
 # Using the `outlook` CLI
@@ -63,6 +63,9 @@ doubt, ask: "Want me to remember this for next time?"
 ## Quick reference
 
 ```
+# Shared mailboxes: add --mailbox <address> to any mail / calendar command
+outlook --mailbox shared@example.com list --folder Inbox
+
 # Reading
 outlook list    [filters]            # list messages (default: 10 newest from Inbox)
 outlook unread  [filters]            # list --unread --top 25
@@ -162,6 +165,33 @@ but call `read <id>` if the user wants the full content.
 ```bash
 outlook read AAMkADQxZDQ1.../=  | jq -r '.Body.Content'
 ```
+
+## Shared mailboxes (`--mailbox`)
+
+Every mail and calendar command takes `--mailbox <address>` to act on a
+shared or delegated mailbox the user has access to (before or after the
+subcommand):
+
+```bash
+outlook --mailbox shared@example.com list --folder Inbox -n 25
+outlook --mailbox shared@example.com read <id>
+outlook --mailbox shared@example.com draft-reply <id> '{"Body":{"ContentType":"Text","Content":"…"}}'
+```
+
+Rules:
+
+- **Ids belong to one mailbox.** Pass the same `--mailbox` to every command
+  that uses an id you got from a `--mailbox` listing. A mismatch fails with
+  `ErrorInvalidMailboxItemId` (exit 3) — fix the flag, don't retry blindly.
+- **Be explicit about which mailbox you are acting on** when you report back
+  ("drafted in shared@example.com's Drafts"). Outputs include a `Mailbox`
+  field for this.
+- **Read state and categories in a shared mailbox are shared** with everyone
+  who uses it. Don't mark read, move, or recategorise shared mail unless
+  the user asked for that specific change.
+- `send --mailbox …` sends **from the shared mailbox**. Same confirmation
+  rule as any send.
+- Graph / Teams commands reject `--mailbox` (exit 64).
 
 ## Searching effectively
 

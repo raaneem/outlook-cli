@@ -11,6 +11,7 @@
 import { AppError, E } from './errors.mjs';
 import { debug } from './output.mjs';
 import { DEFAULT_RESOURCE, resourceBase } from './resources.mjs';
+import { anchorHeaders, mailboxBase } from './mailbox.mjs';
 
 const DEFAULT_TIMEOUT_MS = 30_000;
 
@@ -55,7 +56,8 @@ function networkError(cause, url) {
  *
  * The base URL is chosen by `init.resource` (default "outlook"); pass e.g.
  * `{ resource: 'graph' }` to hit Graph with a Graph-audience token. `path`
- * is appended to that resource's base.
+ * is appended to that resource's base. `init.mailbox` (an SMTP address)
+ * targets a shared mailbox instead of /me -- Outlook resource only.
  *
  * Transient failures are retried up to MAX_ATTEMPTS with backoff:
  *   - 429/503 responses (throttled/unavailable — not processed) for any method.
@@ -65,11 +67,23 @@ function networkError(cause, url) {
  * returned to the caller untouched.
  */
 export async function call(auth, path, init = {}) {
-  // `resource` is our routing hint, not a fetch option — pull it out.
-  const { resource: res_, ...fetchInit } = init;
-  const base = resourceBase(res_ ?? DEFAULT_RESOURCE);
+  // `resource` and `mailbox` are routing hints, not fetch options -- pull
+  // them out.
+  const { resource: res_, mailbox, ...fetchInit } = init;
+  const key = res_ ?? DEFAULT_RESOURCE;
+  if (mailbox && key !== DEFAULT_RESOURCE) {
+    // Graph and Substrate address other users differently; silently
+    // dropping the mailbox would act on the wrong one.
+    throw new AppError({
+      code: E.ARGS,
+      message: `--mailbox applies to Outlook mail and calendar only, not ${key}.`,
+      hint: 'Drop --mailbox for Graph, Teams and Substrate commands.',
+    });
+  }
+  const base = mailbox ? mailboxBase(mailbox) : resourceBase(key);
   const url = `${base}${path}`;
   const method = fetchInit.method ?? 'GET';
+  const headers = mailbox ? anchorHeaders(auth, mailbox) : auth;
 
   for (let attempt = 0; ; attempt++) {
     debug('fetch', method, url, attempt > 0 ? `(attempt ${attempt + 1})` : '');
@@ -78,7 +92,7 @@ export async function call(auth, path, init = {}) {
       res = await fetch(url, {
         ...fetchInit,
         headers: {
-          ...auth,
+          ...headers,
           Accept: 'application/json',
           ...(fetchInit.headers ?? {}),
         },

@@ -284,6 +284,29 @@ test('unread accepts the full list filter set (README example)', async () => {
   }
 });
 
+test('unread accepts --select and --folder (0.4.0 rejected them as unknown options)', async () => {
+  let observedUrl = null;
+  const mock = await startMockServer((req, res) => {
+    observedUrl = req.url;
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ value: [] }));
+  });
+  try {
+    const { code } = await runCli(['unread', '--select', 'Id,Subject', '--folder', 'Inbox'], {
+      env: {
+        OUTLOOK_TOKEN_CACHE: seedTokenCache(),
+        OUTLOOK_API_BASE: `${mock.url}/api/v2.0/me`,
+      },
+    });
+    assert.equal(code, 0);
+    assert.match(observedUrl, /^\/api\/v2\.0\/me\/mailfolders\/Inbox\/messages\?/);
+    assert.match(observedUrl, /\$select=Id%2CSubject/);
+    assert.match(decodeURIComponent(observedUrl), /IsRead eq false/);
+  } finally {
+    await mock.close();
+  }
+});
+
 test('unread respects an explicit --top over its default', async () => {
   let observedUrl = null;
   const mock = await startMockServer((req, res) => {
