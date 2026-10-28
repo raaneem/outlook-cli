@@ -8,6 +8,8 @@ import {
   buildQuery,
   parseTimeArg,
   resolveFolder,
+  wellKnownFolder,
+  looksLikeFolderId,
 } from '../src/odata.mjs';
 import { AppError, E } from '../src/errors.mjs';
 
@@ -130,6 +132,17 @@ test('resolveFolder throws E_ARGS for unknown short names', () => {
     () => resolveFolder('Project Alpha'),
     (err) => err instanceof AppError && err.code === E.ARGS,
   );
+});
+
+test('wellKnownFolder maps aliases and returns null for any other name', () => {
+  assert.equal(wellKnownFolder('Archive'), 'Archive');
+  assert.equal(wellKnownFolder('deleted items'), 'DeletedItems');
+  assert.equal(wellKnownFolder('Project Alpha'), null);
+});
+
+test('looksLikeFolderId tells opaque ids from display names', () => {
+  assert.equal(looksLikeFolderId('AAMkADQxZDQ1ODU0LTQ0ODUtNDVjOS04YTFiLTll'), true);
+  assert.equal(looksLikeFolderId('Inbox/Projects'), false);
 });
 
 // ---------------------------------------------------------------------------

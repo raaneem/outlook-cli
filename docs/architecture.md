@@ -67,7 +67,7 @@ issues.
 | `x-tenantid` | Helps the backend resolve cross-tenant access faster. |
 | `x-ms-appname` | OWA reports `owa-reactmail`; matching avoids "unknown client" branches. |
 | `x-clientid`, `x-owa-sessionid`, `x-client-version` | Telemetry / consistency. |
-| `prefer: IdType="ImmutableId", exchange.behavior="…"` | Selects ID format + feature flags. |
+| `prefer: exchange.behavior="…"` | Feature flags. The value captured in the tested tenant does **not** request `IdType="ImmutableId"`, so message ids change when a message moves folders ([`LEARNINGS.md`](../LEARNINGS.md) §16). |
 
 The list lives at `FORWARDED_HEADERS` in `src/capture.mjs`.
 
@@ -140,6 +140,10 @@ call(auth, path, { resource = 'outlook', ...init })
 - `auth` is the header bag (`{ authorization, x-anchormailbox, … }`).
 - `path` is appended to the chosen resource's base URL (default
   `https://outlook.office.com/api/v2.0/me`; `graph` → `graph.microsoft.com/v1.0`).
+- `mailbox` (set from `--mailbox`) targets a shared mailbox: `/me` becomes
+  `/users/{smtp}` and the captured `x-anchormailbox` is *replaced* by
+  `SMTP:{smtp}`, so Exchange routes to that mailbox's shard. Outlook
+  resource only; `src/mailbox.mjs` holds this logic.
 - Every request is bounded by `OUTLOOK_HTTP_TIMEOUT_MS` (default 30s).
 - Transient failures retry with backoff: `429`/`503` (honouring
   `Retry-After`) for any method; network errors (DNS/refused/timeout) for
@@ -164,6 +168,7 @@ code:
 | `E_AUTH_REQUIRED` | No usable session; run `outlook auth` | 2 |
 | `E_AUTH_BLOCKED` | Browser loaded OWA but never produced a Bearer | 2 |
 | `E_HTTP` | API returned 4xx/5xx | 3 |
+| `E_PRECONDITION` | Mailbox not in the required state (id not in that mailbox, draft changed since preview, writes or sends disabled); nothing changed | 4 |
 | `E_ARGS` | Bad input (e.g. invalid JSON to `send`) | 64 |
 | `E_UNEXPECTED` | Anything we didn't anticipate | 1 |
 

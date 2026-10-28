@@ -24,6 +24,19 @@ test('AppError without hint or cause still constructs', () => {
   const err = new AppError({ code: E.UNEXPECTED, message: 'oops' });
   assert.equal(err.hint, undefined);
   assert.equal(err.cause, undefined);
+  assert.equal('status' in err, false);
+  assert.equal('serverCode' in err, false);
+});
+
+test('AppError keeps the HTTP status and server error code when given', () => {
+  const err = new AppError({
+    code: E.HTTP,
+    message: 'GET /messages/x returned HTTP 404.',
+    status: 404,
+    serverCode: 'ErrorItemNotFound',
+  });
+  assert.equal(err.status, 404);
+  assert.equal(err.serverCode, 'ErrorItemNotFound');
 });
 
 test('exitCodeFor maps every E.* to a stable exit code', () => {
@@ -32,6 +45,7 @@ test('exitCodeFor maps every E.* to a stable exit code', () => {
     [E.AUTH_BLOCKED, EXIT.AUTH],
     [E.HTTP, EXIT.HTTP],
     [E.ARGS, EXIT.USAGE],
+    [E.PRECONDITION, EXIT.PRECONDITION],
     [E.UNEXPECTED, EXIT.GENERAL],
   ];
   for (const [code, expected] of cases) {

@@ -18,6 +18,7 @@ code from the table below.
 | `E_AUTH_BLOCKED` | 2 | Browser loaded OWA but never produced a Bearer token (or the window was closed mid-capture). | See "Bearer never observed" below |
 | `E_HTTP` | 3 | Outlook API returned 4xx/5xx after retries. The hint contains the server's error message. | Depends on body — see "HTTP errors" below |
 | `E_NETWORK` | 3 | Could not reach the API at all (DNS, connection refused, timeout) after retries. | Check network/VPN/proxy; raise `OUTLOOK_HTTP_TIMEOUT_MS` on slow links |
+| `E_PRECONDITION` | 4 | The mailbox isn't in the state the command needs: an id isn't in the target mailbox, a draft changed since its preview (or isn't sendable), or `OUTLOOK_READ_ONLY` / `OUTLOOK_NO_SEND` refused the request. **Nothing was changed or sent.** | See "Shared mailboxes and organising mail" below |
 | `E_ARGS` | 64 | Bad input (e.g. invalid JSON for `send`, non-numeric `--top`, unknown flag). | Fix the input |
 | `E_UNEXPECTED` | 1 | Something we didn't anticipate. | Re-run with `--debug` and read the stack trace |
 
@@ -100,6 +101,52 @@ actually click through anything they show. **Fix:** re-run
 `outlook auth --all` and check every tab that opens (not just the first)
 before it closes on its own; if a Teams/Copilot tab shows a prompt,
 complete it there too. See LEARNINGS.md §15 for the full story.
+
+## Shared mailboxes and organising mail
+
+### `ErrorInvalidMailboxItemId` ("Item Id doesn't belong to the current mailbox")
+
+The id came from a different mailbox than the one you're calling. Ids are
+bound to their mailbox: an id listed with `--mailbox shared@example.com`
+only works with that same `--mailbox`, and vice versa. It is **not** a
+transient routing error — retrying other URL shapes won't help (see
+[`LEARNINGS.md`](../LEARNINGS.md) §16). The organising commands report
+it per message and change nothing (exit 4).
+
+### `ErrorItemNotFound` / "not-found" for an id you just listed
+
+The message was deleted or **moved**. Ids in this tenant are not
+immutable, so a moved message has a new Id (`move` / `archive` return it
+as `newId`). List again for fresh ids.
+
+### `ErrorAccessDenied` or `ErrorNonExistentMailbox` with `--mailbox`
+
+Check the address, and that your account has Full Access to that mailbox
+(Exchange permission, not something the CLI or token controls).
+
+### "Refusing …: OUTLOOK_READ_ONLY is set" / "OUTLOOK_NO_SEND is set"
+
+`OUTLOOK_READ_ONLY` refuses every write and `OUTLOOK_NO_SEND` refuses mail
+submission (exit 4); reads still work. Unset the variable to proceed.
+
+### `send-draft`: "Draft changed since it was previewed (ChangeKey mismatch)"
+
+The draft was edited after the `--dry-run` preview that produced your
+`--expect-change-key` — by someone in OWA, or by a later PATCH. Nothing was
+sent. Preview again, re-approve, and pass the new `changeKey`.
+
+### `send-draft`: `ErrorSendAsDenied`
+
+With `--mailbox`, sending from the shared mailbox needs **Send As** or
+**Send on Behalf** on it. Full Access alone lets you read and draft, not
+send. That's an Exchange permission for the mailbox's admin to grant.
+
+### `send-draft`: `"outcome": "unknown"`
+
+The connection dropped mid-send, so the CLI can't tell whether Exchange
+accepted the message. It never resends; the result's `draftStillInDrafts`
+says whether the draft is still waiting (`true`: most likely not sent;
+`false`: most likely sent). Check Sent Items before trying again.
 
 ### "Chromium flashes on every call"
 

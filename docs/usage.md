@@ -8,6 +8,7 @@ machine-generated version.
 | Flag | Effect |
 | --- | --- |
 | `--debug` | Verbose diagnostics on stderr (`OUTLOOK_DEBUG=1`) |
+| `--mailbox <address>` | Act on a shared or delegated mailbox instead of your own (mail + calendar commands) — see [Shared mailboxes](#shared-mailboxes---mailbox) |
 | `-V`, `--version` | Print the CLI version |
 | `-h`, `--help` | Print help (works on any subcommand too) |
 
@@ -20,6 +21,8 @@ Environment variables:
 | `OUTLOOK_TOKEN_CACHE=/path` | Override the cached-headers JSON file |
 | `OUTLOOK_HTTP_TIMEOUT_MS=n` | Per-request timeout (default 30000) |
 | `OUTLOOK_NO_CAPTURE=1` | Never launch Chromium; fail with `E_AUTH_REQUIRED` instead (CI, headless boxes) |
+| `OUTLOOK_READ_ONLY=1` | Refuse every request that could change a mailbox (exit 4, `E_PRECONDITION`); reads still work. For dry runs of automation |
+| `OUTLOOK_NO_SEND=1` | Refuse only mail submission (`send`, `send-draft`, raw `/send` / `/sendmail`; exit 4). Drafting and organising still work. For unattended automation that must never send |
 | `OUTLOOK_GRAPH_BASE=/url` | Override the Microsoft Graph base URL |
 | `OUTLOOK_TOKEN_CACHE_GRAPH=/path` | Override the Graph token cache file (`_SUBSTRATE` also works) |
 | `XDG_DATA_HOME` / `XDG_CACHE_HOME` | Standard XDG roots |
@@ -34,13 +37,40 @@ rarely surface:
   once. Only if the *fresh* token is also rejected do you get
   `E_AUTH_REQUIRED` — at that point run `outlook auth`.
 - **Throttling / outage (429, 503):** retried up to 2 more times, honouring
-  the server's `Retry-After` header (capped at 30 s per wait).
+  the server's `Retry-After` header (capped at 30 s per wait). `send-draft`
+  retries only 429: a send is never repeated after a 503.
 - **Network failures (DNS, refused, timeout):** GET requests are retried
   with backoff; writes are **not** auto-retried at the network level (a
   timed-out send may already have been delivered). Failures surface as
   `E_NETWORK` (exit 3).
 - **Hung connections:** every request is bounded by
   `OUTLOOK_HTTP_TIMEOUT_MS` (default 30 s) — the CLI never hangs forever.
+
+## Shared mailboxes (`--mailbox`)
+
+Every mail and calendar command can act on a shared or delegated mailbox
+you have access to, addressed by its SMTP address:
+
+```bash
+outlook --mailbox shared@example.com list --folder Inbox -n 25
+outlook --mailbox shared@example.com read <id>
+outlook --mailbox shared@example.com draft-reply <id> '{"Body":{"ContentType":"Text","Content":"On it."}}'
+outlook list --mailbox shared@example.com     # the flag also works after the subcommand
+```
+
+- Requests go to `/users/{address}/…` instead of `/me/…` with the same
+  token — no extra sign-in, no new consent. Exchange checks *your*
+  permissions on that mailbox: Full Access to read and change it, Send As
+  or Send on Behalf to send from it.
+- **Message ids belong to the mailbox they came from.** Always pass the same
+  `--mailbox` you listed with. An id used against the wrong mailbox fails
+  with `ErrorInvalidMailboxItemId` instead of touching anything.
+- Drafts created with `--mailbox` land in the shared mailbox's Drafts
+  folder; the output's `Mailbox` field says which mailbox was used.
+- `send` with `--mailbox` sends **from the shared mailbox**.
+- Graph, Teams and Substrate commands refuse `--mailbox` (exit 64) rather
+  than silently acting on your own account. `graph --resource outlook`
+  honours it.
 
 ## Subcommands
 
@@ -224,11 +254,118 @@ outlook read "$MSG" | jq '.Body.Content' -r
 
 ### `outlook folders`
 
-List mail folders (Inbox, Sent Items, Drafts, custom folders…).
+List mail folders (Inbox, Sent Items, Drafts, custom folders…): the top
+level by default (up to `-n 100`, page with `-s`), or the subfolders of
+`--parent <folder>` (a name, a path like `Inbox/Projects`, or an Id).
 
 ```bash
 outlook folders | jq '.value[] | {DisplayName, UnreadItemCount}'
+outlook folders --parent Inbox | jq -r '.value[].DisplayName'
 ```
+
+## Organising mail
+
+Commands that change existing messages share one contract:
+
+- **Ids** come as arguments or on STDIN — a JSON array, or one per line, so
+  `outlook list … | jq -r '.value[].Id' | outlook mark-read` works. Up to
+  100 per call; duplicates are dropped.
+- **Preflight first.** Every id is read from the target mailbox before
+  anything changes. If any id is missing (deleted, moved, or from another
+  mailbox), **nothing is written** and the command exits 4.
+- **`--dry-run`** does all the reads and planning and sends no writes.
+- **Already done = skipped**, so re-running a command is safe.
+- **One JSON result** on stdout, even on failure:
+
+```json
+{
+  "ok": true, "command": "mark-read", "mode": "apply", "mailbox": null,
+  "aborted": false,
+  "counts": { "requested": 2, "changed": 1, "wouldChange": 0, "skipped": 1,
+              "notFound": 0, "failed": 0, "notRun": 0 },
+  "items": [
+    { "id": "AAMk…", "subject": "…", "status": "changed",
+      "before": { "isRead": false }, "after": { "isRead": true } },
+    { "id": "AAMk…", "subject": "…", "status": "skipped", "reason": "already-read" }
+  ]
+}
+```
+
+Item `status` is one of `changed`, `would-change` (dry run), `skipped`,
+`not-found`, `failed`, `not-run`. Failed and missing items carry an
+`error` with `code`, `status`, `serverCode` (e.g. `ErrorItemNotFound`),
+`message`, `hint`. Exit codes: 0 when everything changed or was skipped;
+4 when preflight found missing ids (nothing changed); otherwise the first
+failure's code (3 for an HTTP error, with the other messages still
+processed).
+
+### `outlook mark-read <ids…>` / `outlook mark-unread <ids…>`
+
+```bash
+outlook mark-read "$ID"
+outlook unread --from noreply@example.com | jq -r '.value[].Id' | outlook mark-read --dry-run
+outlook --mailbox shared@example.com mark-unread "$ID"
+```
+
+In a shared mailbox, read state is shared by everyone who uses it.
+
+### `outlook move <ids…> --to <folder>` / `outlook archive <ids…>`
+
+```bash
+outlook archive "$ID"                                  # = move --to Archive
+outlook move "$ID" --to Deleted                        # soft delete (Deleted Items)
+outlook move "$ID" --to "Inbox/Projects/2026"          # folder path, case-insensitive
+outlook move "$ID" --to AAMkAD…                        # folder Id from `outlook folders`
+outlook --mailbox shared@example.com archive "$ID" --dry-run
+```
+
+- `--to` takes a well-known name (`Inbox`, `Archive`, `Deleted`, `Junk`,
+  `Sent`, `Drafts`, `Outbox`), a display-name path walked from the top
+  level (`Inbox/Projects`), or a folder Id. Well-known names are resolved
+  by role, not by display name, so they work in mailboxes set to other
+  languages. An unknown or ambiguous folder exits 64 before any message is
+  touched.
+- **A moved message gets a new Id**, returned per item as `newId`; the old
+  Id stops working. Do any `mark-read` / `categorize` first, then move.
+- `archive` uses the mailbox's Archive folder — what OWA's Archive button
+  does, not the online-archive mailbox. A mailbox without one exits 64.
+- Nothing is hard-deleted; `--to Deleted` moves to Deleted Items.
+
+The result adds `destination: { id, displayName, wellKnownName }`, and
+each item's `before` / `after` carry `folderId`.
+
+### `outlook categories`
+
+List the mailbox's master categories — the names `categorize` accepts.
+
+```bash
+outlook --mailbox shared@example.com categories | jq -r '.value[].DisplayName'
+```
+
+### `outlook categorize <ids…> (--add <name>… --remove <name>… | --set <name>… | --clear)`
+
+```bash
+outlook categorize "$ID" --add "For information"
+outlook categorize "$ID" --remove "In progress" --add "Done"
+outlook categorize "$ID" --set "Done"                 # replace the whole list
+outlook categorize "$ID" --clear
+outlook --mailbox shared@example.com categorize "$ID1" "$ID2" --add "In progress" --dry-run
+```
+
+- `--add` / `--set` names must exist in the mailbox's **master category
+  list**; they're matched case-insensitively and written in the list's
+  exact spelling (`for information` → `For information`). Exchange would
+  otherwise store any typo as a new uncoloured category. Unknown names exit
+  64 before any message is read, listing the known ones. `--allow-unlisted`
+  skips the check and writes names as typed.
+- `--remove` matches the message's own categories case-insensitively, so it
+  can clean up names that were never in the master list.
+- `--add` and `--remove` combine; `--set` and `--clear` stand alone.
+  Repeat a flag for several names.
+- Messages that would end up unchanged are skipped.
+
+The result adds `change: { add, remove, set, clear }` (with canonical
+names), and each item's `before` / `after` carry `categories`.
 
 ### `outlook draft [json]`
 
@@ -280,6 +417,48 @@ outlook draft-forward $ID '{
 
 Permanently delete a draft. No confirmation prompt — call only when you're
 sure.
+
+### `outlook send-draft <id>`
+
+Send an existing draft — **immediately and irreversibly**. Two steps, by
+design:
+
+```bash
+# 1. Preview: recipients, subject, attachments, body preview, changeKey.
+outlook send-draft "$DRAFT_ID" --dry-run
+
+# 2. After the user approves that preview, send it -- quoting its changeKey.
+outlook send-draft "$DRAFT_ID" --expect-change-key "<changeKey from step 1>"
+```
+
+The send is refused (exit 4, nothing sent) if:
+
+- the draft **changed since the preview** (its `ChangeKey`, Exchange's
+  version stamp, differs — e.g. someone edited it in OWA);
+- the id is not an unsent draft (a received message is never re-sent), or
+  the draft is not in the Drafts folder;
+- it has no recipients, or more than `--max-recipients <n>`;
+- `OUTLOOK_NO_SEND` / `OUTLOOK_READ_ONLY` is set.
+
+Without `--expect-change-key` (and without `--dry-run`) it exits 64 and
+sends nothing. With `--mailbox`, the draft must be in that mailbox's Drafts
+and goes out **from** that mailbox — Exchange requires Send As (shows as the
+mailbox) or Send on Behalf (shows "you on behalf of …"); without either it
+fails with `ErrorSendAsDenied`.
+
+The send itself is never retried on a 503. If the connection drops
+mid-send, the result says `"sent": null, "outcome": "unknown"` and reports
+whether the draft is still in Drafts (exit 3). Check Sent Items before
+doing anything; don't resend blindly.
+
+```json
+{ "ok": true, "command": "send-draft", "mode": "apply", "mailbox": null, "sent": true,
+  "draft": { "id": "…", "changeKey": "…", "subject": "Re: plan",
+             "from": null, "to": [{ "name": "Alice", "address": "alice@example.com" }],
+             "cc": [], "bcc": [], "recipientCount": 1,
+             "attachments": [{ "name": "plan.pdf", "size": 1234, "contentType": "application/pdf", "isInline": false }],
+             "bodyPreview": "Sounds good…", "lastModified": "…", "webLink": "…" } }
+```
 
 ## Calendar
 
@@ -441,6 +620,7 @@ true }`.
 | 1 | `EXIT.GENERAL` | Generic / unexpected error |
 | 2 | `EXIT.AUTH` | `E_AUTH_REQUIRED` or `E_AUTH_BLOCKED` |
 | 3 | `EXIT.HTTP` | `E_HTTP` (4xx/5xx from the API) |
+| 4 | `EXIT.PRECONDITION` | `E_PRECONDITION` — the mailbox isn't in the state the command needs (id not found there, draft changed since preview or not sendable, writes or sends disabled). Nothing was changed |
 | 64 | `EXIT.USAGE` | `E_ARGS` (bad input) |
 | 130 | `EXIT.SIGINT` | Interrupted with Ctrl-C |
 

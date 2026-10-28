@@ -5,7 +5,7 @@
 
 import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
-import { mkdtempSync, writeFileSync, existsSync, readFileSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, existsSync, readFileSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -98,6 +98,18 @@ test('saveAuth + loadCachedAuth roundtrip preserves headers', () => {
   assert.ok(onDisk.savedAt);
   assert.ok(onDisk.expiresAt);
 });
+
+test(
+  'saveAuth leaves the cache owner-only, even over an older world-readable file',
+  { skip: process.platform === 'win32' && 'POSIX permissions only' },
+  () => {
+    const file = isolatedCacheFile();
+    writeFileSync(file, '{}', { mode: 0o644 }); // what earlier versions left behind
+    const exp = Math.floor(Date.now() / 1000) + 3600;
+    saveAuth({ authorization: `Bearer ${makeFakeJwt({ expSeconds: exp })}` });
+    assert.equal(statSync(file).mode & 0o777, 0o600);
+  },
+);
 
 test('clearAuth removes the cache file', () => {
   const file = isolatedCacheFile();

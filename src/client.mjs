@@ -11,6 +11,7 @@
 import { AppError, E } from './errors.mjs';
 import { debug } from './output.mjs';
 import { DEFAULT_RESOURCE, resourceBase } from './resources.mjs';
+import { anchorHeaders, mailboxBase } from './mailbox.mjs';
 
 const DEFAULT_TIMEOUT_MS = 30_000;
 
@@ -37,6 +38,45 @@ function retryDelayMs(res, attempt) {
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+/** An env switch is on unless unset or "", "0", "false", "no". */
+function envFlag(name) {
+  const v = process.env[name];
+  return !!v && !/^(0|false|no)$/i.test(v.trim());
+}
+
+// POSTs that only read: getSchedule (free-busy) is a lookup with a body.
+const READ_ONLY_POSTS = /\/getSchedule$/i;
+// Mail submission: /messages/{id}/send and /sendmail (any casing).
+const SEND_ROUTES = /\/(send|sendmail)$/i;
+
+/**
+ * Process-wide brakes, enforced here so no command -- or helper script
+ * that imports call() -- can forget them. OUTLOOK_READ_ONLY refuses every
+ * request that could change a mailbox (dry runs of automation);
+ * OUTLOOK_NO_SEND refuses only mail submission, so unattended automation
+ * can organise mail but never send it.
+ */
+function assertWriteAllowed(method, path) {
+  // fetch accepts any casing, so the brakes must too.
+  const verb = String(method).toUpperCase();
+  if (verb === 'GET') return;
+  const route = path.split('?')[0];
+  if (envFlag('OUTLOOK_READ_ONLY') && !(verb === 'POST' && READ_ONLY_POSTS.test(route))) {
+    throw new AppError({
+      code: E.PRECONDITION,
+      message: `Refusing ${verb} ${route}: OUTLOOK_READ_ONLY is set.`,
+      hint: 'Unset OUTLOOK_READ_ONLY to allow changes, or preview with --dry-run.',
+    });
+  }
+  if (envFlag('OUTLOOK_NO_SEND') && SEND_ROUTES.test(route)) {
+    throw new AppError({
+      code: E.PRECONDITION,
+      message: `Refusing to send mail (${verb} ${route}): OUTLOOK_NO_SEND is set.`,
+      hint: 'Unset OUTLOOK_NO_SEND to allow sending. Drafts can still be created.',
+    });
+  }
+}
+
 function networkError(cause, url) {
   const detail =
     cause?.name === 'TimeoutError'
@@ -55,21 +95,37 @@ function networkError(cause, url) {
  *
  * The base URL is chosen by `init.resource` (default "outlook"); pass e.g.
  * `{ resource: 'graph' }` to hit Graph with a Graph-audience token. `path`
- * is appended to that resource's base.
+ * is appended to that resource's base. `init.mailbox` (an SMTP address)
+ * targets a shared mailbox instead of /me -- Outlook resource only.
  *
  * Transient failures are retried up to MAX_ATTEMPTS with backoff:
  *   - 429/503 responses (throttled/unavailable — not processed) for any method.
+ *     `init.retryStatuses` narrows that set for a call that must not repeat
+ *     (send-draft retries only 429).
  *   - Network-level errors (DNS, refused, timeout) for GET only, since a
  *     write that timed out mid-flight may already have been applied.
  * Anything that still fails maps to AppError(E.NETWORK); HTTP statuses are
  * returned to the caller untouched.
  */
 export async function call(auth, path, init = {}) {
-  // `resource` is our routing hint, not a fetch option — pull it out.
-  const { resource: res_, ...fetchInit } = init;
-  const base = resourceBase(res_ ?? DEFAULT_RESOURCE);
+  // `resource`, `mailbox` and `retryStatuses` steer routing and retries;
+  // they are not fetch options -- pull them out.
+  const { resource: res_, mailbox, retryStatuses = RETRYABLE_STATUSES, ...fetchInit } = init;
+  const key = res_ ?? DEFAULT_RESOURCE;
+  if (mailbox && key !== DEFAULT_RESOURCE) {
+    // Graph and Substrate address other users differently; silently
+    // dropping the mailbox would act on the wrong one.
+    throw new AppError({
+      code: E.ARGS,
+      message: `--mailbox applies to Outlook mail and calendar only, not ${key}.`,
+      hint: 'Drop --mailbox for Graph, Teams and Substrate commands.',
+    });
+  }
+  const base = mailbox ? mailboxBase(mailbox) : resourceBase(key);
   const url = `${base}${path}`;
   const method = fetchInit.method ?? 'GET';
+  assertWriteAllowed(method, path);
+  const headers = mailbox ? anchorHeaders(auth, mailbox) : auth;
 
   for (let attempt = 0; ; attempt++) {
     debug('fetch', method, url, attempt > 0 ? `(attempt ${attempt + 1})` : '');
@@ -78,7 +134,7 @@ export async function call(auth, path, init = {}) {
       res = await fetch(url, {
         ...fetchInit,
         headers: {
-          ...auth,
+          ...headers,
           Accept: 'application/json',
           ...(fetchInit.headers ?? {}),
         },
@@ -94,7 +150,7 @@ export async function call(auth, path, init = {}) {
       throw networkError(cause, url);
     }
 
-    if (RETRYABLE_STATUSES.has(res.status) && attempt < MAX_ATTEMPTS - 1) {
+    if (retryStatuses.has(res.status) && attempt < MAX_ATTEMPTS - 1) {
       const wait = retryDelayMs(res, attempt);
       debug(`HTTP ${res.status}; retrying in ${wait}ms`);
       await res.text().catch(() => {}); // drain so the connection is reusable

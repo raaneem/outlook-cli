@@ -23,6 +23,11 @@ adds `outlook` to your `$PATH`.
 | `src/capture.mjs` | Playwright launcher + Bearer-header capture (lazy-imported) |
 | `src/client.mjs` | Pure-fetch `call()` wrapper, `OUTLOOK_API_BASE` override |
 | `src/resources.mjs` | Microsoft resource registry (outlook/graph/substrate): base URLs, audiences, token classification |
+| `src/mailbox.mjs` | `--mailbox` shared-mailbox routing: `/users/{smtp}` base, anchor header, address validation |
+| `src/actions.mjs` | Batch runner for message-changing commands (`mark-read`, `move`, `categorize`, …): id parsing, preflight, per-message results |
+| `src/folders.mjs` | Destination folders for `move` / `archive`: well-known names (by role, not display name), folder paths, Ids |
+| `src/categories.mjs` | `categorize`: master-category validation, canonical spelling, add/remove/set/clear |
+| `src/send-draft.mjs` | `send-draft` preview and sendability checks (unsent draft, in Drafts, recipients, unchanged ChangeKey) |
 | `src/audit.mjs` | `token-audit` — decode cached tokens + group scopes into capability areas (offline) |
 | `src/odata.mjs` | Mail filter / query builders (`--unread`, `--from`, `--folder`, …) |
 | `src/calendar.mjs` | Calendar time parsing, calendarView URL builder, event filters |
@@ -139,9 +144,16 @@ exit-code regressions in one shot. The helpers in `test/helpers.mjs`:
   automatic 401-recapture path without Playwright.
 - `startMockServer(handler)` — `http.createServer` on a random port, returns
   `{ url, close }`. Pass via `OUTLOOK_API_BASE` env var.
+- `startFakeMailbox(mailboxes, { faults })` — in-memory Exchange stand-in
+  (messages, folders, master categories, under both `/me` and
+  `/users/{smtp}`) for the message-changing commands. Ids are bound to their
+  mailbox and moves assign new Ids, like the real server; `writes()` lists
+  every non-GET request, so dry-run tests can assert it stays empty.
 - `runCli(args, { env, stdin, timeoutMs })` — spawn `src/cli.mjs`, return
-  `{ code, stdout, stderr }`. Sets `OUTLOOK_NO_CAPTURE=1` by default so no
-  test can accidentally launch Chromium.
+  `{ code, stdout, stderr }`. Every run starts isolated:
+  `OUTLOOK_NO_CAPTURE=1`, empty tmp token caches and XDG dirs, and API bases
+  pointed at a closed local port — so a test that forgets to pin something
+  can never read your real token or reach Microsoft with it.
 
 Two env seams in `auth.mjs` keep the browser out of tests:
 

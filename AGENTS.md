@@ -34,6 +34,17 @@ consent problem — see [`LEARNINGS.md`](./LEARNINGS.md) §13. Non-default
 resources never auto-launch the browser mid-command; they error toward `auth
 --all`.
 
+## Shared mailboxes (`--mailbox`)
+
+`--mailbox <smtp>` is a root option that sends every Outlook call to
+`/users/{smtp}` instead of `/me`, with the captured `x-anchormailbox`
+replaced by `SMTP:{smtp}` (`src/mailbox.mjs`, applied in `client.call`).
+Upstream lists multi-mailbox support as a non-goal (PRD §3), so this lives
+in the fork; keep it to that one routing seam so upstream merges stay
+cheap. Message ids are bound to their mailbox — see
+[`LEARNINGS.md`](./LEARNINGS.md) §16 before debugging
+`ErrorInvalidMailboxItemId`.
+
 ## TL;DR — hard constraints you must respect
 
 1. **Never add OAuth flows that require admin consent.** The whole point of
@@ -103,6 +114,11 @@ src/
   odata.mjs      # mail filter / query builders (--unread, --from, --folder, …)
   calendar.mjs   # calendar time parsing, calendarView URL, event filters
   resources.mjs  # registry of Microsoft resources (outlook/graph/substrate): base URL, audiences, classification
+  mailbox.mjs    # --mailbox: shared-mailbox routing (/users/{smtp} base + anchor header)
+  actions.mjs    # batch runner for message-changing commands: id parsing, preflight, per-message results
+  folders.mjs    # move/archive destinations: well-known names, folder paths, Ids
+  categories.mjs # categorize: master-list validation, canonical spelling, add/remove/set/clear
+  send-draft.mjs # send-draft: preview + sendability checks (IsDraft, Drafts folder, ChangeKey)
   audit.mjs      # token-audit: decode cached tokens + group scopes into capability areas (offline)
   learn.mjs      # persistent learnings (load/add/forget/clear)
   jwt.mjs        # tiny JWT payload decoder (no signature validation)
@@ -141,11 +157,18 @@ slows down every command).
   constants in `errors.mjs`) and an actionable `hint`. Map new failure modes
   to a code and add it to the table in `docs/troubleshooting.md`.
 - **Exit codes follow `EXIT.*`** in `errors.mjs`: 0 OK, 1 generic, 2 auth, 3
-  HTTP/network, 64 usage, 130 SIGINT. Don't invent new ones without updating
+  HTTP/network, 4 precondition (mailbox not in the required state; nothing
+  changed), 64 usage, 130 SIGINT. Don't invent new ones without updating
   the docs.
+- **Message-changing commands go through `runMessageBatch`** (`actions.mjs`):
+  preflight every id, write nothing if any is missing, `--dry-run` sends
+  only GETs, one JSON result with per-message status. Don't hand-roll a
+  write loop for a new verb.
 - **Recovery is automatic where safe.** A 401 clears the cache, recaptures
-  once, and retries; 429/503 retry with `Retry-After` backoff; network
-  errors retry GETs only. Don't add per-command retry loops on top of this.
+  once, and retries; 429/503 retry with `Retry-After` backoff (a call that
+  must never repeat narrows this with `retryStatuses` — `send-draft` retries
+  only 429); network errors retry GETs only. Don't add per-command retry
+  loops on top of this.
 - **Dependencies stay minimal.** Right now only `commander` and `playwright`.
   Adding a dep requires a clear justification (writing your own would be
   significant work).

@@ -1,6 +1,6 @@
 ---
 name: outlook
-description: Read, search, triage, draft, and send mail PLUS view and manage calendar events through the user's Outlook / Microsoft 365 mailbox, PLUS list Microsoft Teams (teams, channels, chats, members) and post Teams chat messages via Graph. Use when the user asks to check inbox, summarise unread mail, find a specific email, draft a reply they can review, send mail, view their calendar / agenda, find what meetings they have today / this week, create or update calendar events, RSVP to invites, check free/busy, list their Teams / chats, or send a Teams message. Teams needs `outlook auth --all`; reading Teams message bodies may be blocked by tenant scope. Copilot is not supported (streaming protocol). Prefer drafts (`draft`, `draft-reply`, `draft-reply-all`, `draft-forward`) over direct send so the user can review in Outlook first. Confirm with the user before creating or cancelling events with attendees (invitations / cancellations send IMMEDIATELY). Requires the `outlook` CLI to be installed on the user's PATH; if it is not, tell the user and stop. All output is JSON to stdout; pipe through `jq` for transformation. This skill does NOT cover Gmail, IMAP, or other mail providers.
+description: Read, search, triage, draft, and send mail PLUS view and manage calendar events through the user's Outlook / Microsoft 365 mailbox, PLUS list Microsoft Teams (teams, channels, chats, members) and post Teams chat messages via Graph. Use when the user asks to check inbox, summarise unread mail, find a specific email, draft a reply they can review, send mail, view their calendar / agenda, find what meetings they have today / this week, create or update calendar events, RSVP to invites, check free/busy, list their Teams / chats, or send a Teams message. Works on shared / delegated mailboxes too via `--mailbox <address>`. Teams needs `outlook auth --all`; reading Teams message bodies may be blocked by tenant scope. Copilot is not supported (streaming protocol). Prefer drafts (`draft`, `draft-reply`, `draft-reply-all`, `draft-forward`) over direct send so the user can review in Outlook first; a draft the user has approved in chat is sent with the two-step `send-draft` (preview, then send quoting the preview's changeKey). Also organises mail: mark read/unread, move/archive, and categorise (validated against the mailbox's master categories). Confirm with the user before creating or cancelling events with attendees (invitations / cancellations send IMMEDIATELY). Requires the `outlook` CLI to be installed on the user's PATH; if it is not, tell the user and stop. All output is JSON to stdout; pipe through `jq` for transformation. This skill does NOT cover Gmail, IMAP, or other mail providers.
 ---
 
 # Using the `outlook` CLI
@@ -20,6 +20,7 @@ session. It's free (no network, no Chromium) and returns:
 ```json
 {
   "user": { "email": "…", "name": "…", "tenant_id": "…" },
+  "mailbox": null,
   "tokenMinutesUntilExpiry": 1408,
   "learnings": [
     "2026-05-18 | Signs off as Sam",
@@ -30,7 +31,9 @@ session. It's free (no network, no Chromium) and returns:
 }
 ```
 
-Use `user.email` to know whose mailbox you're acting on. Use `learnings`
+`user.email` is who is signed in. `mailbox` is null unless you passed
+`--mailbox`, in which case commands act on *that* mailbox, not the user's
+own — run `outlook --mailbox <address> context` to confirm. Use `learnings`
 to adapt your tone, recipient resolution, and default behaviour to what
 the user has shown they prefer.
 
@@ -63,6 +66,9 @@ doubt, ask: "Want me to remember this for next time?"
 ## Quick reference
 
 ```
+# Shared mailboxes: add --mailbox <address> to any mail / calendar command
+outlook --mailbox shared@example.com list --folder Inbox
+
 # Reading
 outlook list    [filters]            # list messages (default: 10 newest from Inbox)
 outlook unread  [filters]            # list --unread --top 25
@@ -70,12 +76,23 @@ outlook search  "<query>" [filters]  # KQL full-text search
 outlook read    <id>                 # full message JSON
 outlook folders                       # list mail folders
 
+# Organising (ids as args or STDIN; preflight first; --dry-run previews; JSON result)
+outlook mark-read   <id…> [--dry-run]       # mark messages read
+outlook mark-unread <id…> [--dry-run]       # mark messages unread
+outlook archive     <id…> [--dry-run]       # move to the Archive folder
+outlook move        <id…> --to <folder> [--dry-run]   # Inbox / Deleted / "Inbox/Projects" / folder Id
+outlook folders [--parent <folder>]         # list folders (or subfolders) to find a --to target
+outlook categories                          # the mailbox's master category names
+outlook categorize  <id…> --add <name> [--remove <name>] [--dry-run]   # or --set <name>… / --clear
+
 # Drafting (review-first — preferred for AI-generated mail)
 outlook draft             <json>  [--attach <path>…]   # new draft (reads STDIN if no arg)
 outlook draft-reply       <id>  [json] [--attach <path>…]   # draft reply to a message
 outlook draft-reply-all   <id>  [json] [--attach <path>…]   # draft reply-all
 outlook draft-forward     <id>  [json] [--attach <path>…]   # draft a forward
 outlook discard-draft     <id>              # delete a draft
+outlook send-draft        <id> --dry-run    # preview a draft before sending (prints changeKey)
+outlook send-draft        <id> --expect-change-key <key>   # send it — ONLY after the user approved that preview
 
 # Sending (skips review — only after explicit user confirmation)
 outlook send                       [--attach <path>…]   # send mail directly (STDIN JSON)
@@ -163,6 +180,34 @@ but call `read <id>` if the user wants the full content.
 outlook read AAMkADQxZDQ1.../=  | jq -r '.Body.Content'
 ```
 
+## Shared mailboxes (`--mailbox`)
+
+Every mail and calendar command takes `--mailbox <address>` to act on a
+shared or delegated mailbox the user has access to (before or after the
+subcommand):
+
+```bash
+outlook --mailbox shared@example.com list --folder Inbox -n 25
+outlook --mailbox shared@example.com read <id>
+outlook --mailbox shared@example.com draft-reply <id> '{"Body":{"ContentType":"Text","Content":"…"}}'
+```
+
+Rules:
+
+- **Ids belong to one mailbox.** Pass the same `--mailbox` to every command
+  that uses an id you got from a `--mailbox` listing. A mismatch fails with
+  `ErrorInvalidMailboxItemId` (exit 3 for `read`/drafts, exit 4 for the
+  organising commands) — fix the flag, don't retry blindly.
+- **Be explicit about which mailbox you are acting on** when you report back
+  ("drafted in shared@example.com's Drafts"). Outputs include a `Mailbox`
+  field for this.
+- **Read state and categories in a shared mailbox are shared** with everyone
+  who uses it. Don't mark read, move, or recategorise shared mail unless
+  the user asked for that specific change.
+- `send --mailbox …` sends **from the shared mailbox**. Same confirmation
+  rule as any send.
+- Graph / Teams commands reject `--mailbox` (exit 64).
+
 ## Searching effectively
 
 `search` uses Outlook's full-text engine (KQL-style). Quote multi-word
@@ -182,6 +227,69 @@ outlook list --from alice@example.com --since 7d
 # Works but slower / less precise
 outlook search "from:alice"
 ```
+
+## Organising mail
+
+Commands that change existing messages take one or more ids (arguments,
+or STDIN as a JSON array / one per line) and print one JSON result:
+
+```bash
+outlook mark-read "$ID1" "$ID2"
+outlook unread --from noreply@example.com | jq -r '.value[].Id' | outlook mark-read --dry-run
+```
+
+```json
+{ "ok": true, "command": "mark-read", "mode": "apply", "mailbox": null, "aborted": false,
+  "counts": { "requested": 2, "changed": 1, "skipped": 1, "notFound": 0, "failed": 0, … },
+  "items": [ { "id": "…", "status": "changed", "before": {…}, "after": {…} },
+             { "id": "…", "status": "skipped", "reason": "already-read" } ] }
+```
+
+- Every id is checked first. If any is missing from that mailbox,
+  **nothing changes** (`aborted: true`, exit 4) — re-list for fresh ids,
+  and check `--mailbox`.
+- Use `--dry-run` to show the user what a bulk change would do before
+  doing it. It sends no writes.
+- Read `ok` and `counts`, and report per-message `failed` items to the
+  user. Don't retry the whole batch blindly — already-done messages are
+  skipped, so re-running only what failed is safe.
+- Only change messages the user asked you to change.
+
+### Moving and archiving
+
+```bash
+outlook archive "$ID"                         # what OWA's Archive button does
+outlook move "$ID" --to Deleted               # soft delete into Deleted Items
+outlook move "$ID" --to "Inbox/Projects"      # folder path, case-insensitive
+```
+
+- **A moved message gets a new Id** (`items[].newId`). The old Id is dead —
+  use `newId` for anything after the move, and do mark-read / categorize
+  *before* moving.
+- `--to` takes a well-known name, a folder path from the top level, or a
+  folder Id. An unknown or ambiguous folder fails (exit 64) before any
+  message is touched; run `outlook folders [--parent X]` to find names.
+- There is no hard delete. "Delete" means `move --to Deleted`; confirm with
+  the user first.
+
+### Categorising
+
+```bash
+outlook categories                                       # names the mailbox knows
+outlook categorize "$ID" --add "For information"
+outlook categorize "$ID" --remove "In progress" --add "Done"
+outlook categorize "$ID" --set "Done"                    # replace the whole list
+```
+
+- Names must be in the mailbox's master list (`outlook categories`). They
+  match case-insensitively and are written in the list's exact spelling.
+  An unknown name fails with exit 64 and lists the known ones — pick from
+  that list or ask the user; **don't pass `--allow-unlisted` unless the
+  user explicitly wants a new category.**
+- Each shared mailbox has its own master list. Run `categories` with the
+  same `--mailbox`.
+- `--add` keeps existing categories; `--set` replaces them all. Use `--set`
+  only when the user wants exactly that list.
 
 ## Drafting mail (review-first — STRONGLY PREFERRED)
 
@@ -293,6 +401,37 @@ If the user changes their mind:
 ```bash
 outlook discard-draft <draftId>
 ```
+
+### Sending a reviewed draft (`send-draft`)
+
+When the user wants a draft sent from chat instead of pressing Send in
+Outlook, use the two-step flow. It **sends immediately and cannot be
+undone**.
+
+```bash
+# 1. Preview, and show the user: recipients (to/cc/bcc), subject, attachments, body preview.
+outlook send-draft "$DRAFT_ID" --dry-run
+
+# 2. Only after the user explicitly approves THAT preview:
+outlook send-draft "$DRAFT_ID" --expect-change-key "<draft.changeKey from step 1>"
+```
+
+- **Never skip step 1, and never send without the user's explicit "yes"
+  to that preview.** Take the `changeKey` from the preview output; never
+  invent or reuse one from an older preview.
+- **Exit 4 "changed since it was previewed"** means the draft was edited
+  after the user saw it. Preview again and ask again.
+- Exit 4 also covers: not a draft, not in Drafts, no recipients, more than
+  `--max-recipients`, or sending disabled (`OUTLOOK_NO_SEND`). Report it;
+  don't work around it.
+- **`"outcome": "unknown"` (exit 3)** means the connection dropped mid-send.
+  Do NOT retry. Tell the user to check Sent Items (the result says whether
+  the draft is still in Drafts).
+- With `--mailbox`, the mail goes out **from the shared mailbox**. Say so
+  when asking for approval. `ErrorSendAsDenied` means the user lacks Send
+  As / Send on Behalf there.
+- Pass `--max-recipients <n>` when you expect a small audience, so a
+  surprise reply-all fails instead of sending.
 
 ## Calendar
 
@@ -467,6 +606,7 @@ outlook list --unread -n 50 2>/dev/null | jq '.value | length'
 | 0 | Success | — |
 | 2 | `E_AUTH_REQUIRED` / `E_AUTH_BLOCKED`. Session is gone — the CLI already tried to re-capture a token automatically and failed. | **Ask the user to run `outlook auth` manually.** You cannot run `outlook auth` yourself — it opens a browser window the user must interact with for MFA. |
 | 3 | `E_HTTP` (API returned 4xx/5xx after automatic retries) or `E_NETWORK` (could not reach the API at all). The stderr block includes the server's error message. | For `E_HTTP`, read the message and fix the request or surface the error. For `E_NETWORK`, tell the user their network/VPN looks down. |
+| 4 | `E_PRECONDITION`. The mailbox isn't in the state the command needs: an id isn't in that mailbox (wrong `--mailbox`, or the message moved and got a new id), a draft changed since its preview or isn't sendable, or `OUTLOOK_READ_ONLY` / `OUTLOOK_NO_SEND` is set. **Nothing was changed or sent.** | Re-list for fresh ids, check `--mailbox`, or re-preview the draft. Don't loop. |
 | 64 | `E_ARGS`. Bad input (invalid JSON, non-numeric `--top`, unknown flag). | Fix the flag / JSON and retry. |
 | 130 | User pressed Ctrl-C. | Stop. |
 
@@ -486,6 +626,9 @@ clearly. Do not loop trying to re-authenticate.
 - "When did <person> last email me?" → `outlook list --from <addr> -n 1`
 - "Find emails from this week with attachments" → `outlook list --since 7d --has-attachments`
 - "What did I send to <person> last month?" → `outlook list --folder Sent --to <addr> --since 30d`
+- "Mark those as read" / "archive that" → `outlook mark-read <ids…>` / `outlook archive <ids…>`
+- "Tag it as <category>" → `outlook categories`, then `outlook categorize <id> --add "<name>"`
+- "Send the draft" (after reviewing it in chat) → `outlook send-draft <id> --dry-run`, get a yes, then `--expect-change-key`
 
 ## When NOT to use this skill
 
@@ -506,6 +649,10 @@ clearly. Do not loop trying to re-authenticate.
   recipient + subject + body with the user, in plain English, before
   sending. When in doubt, use `draft-reply` / `draft` and let the user
   send from Outlook.
+- Don't run `send-draft` without first showing the user its `--dry-run`
+  preview and getting an explicit yes to that exact preview.
+- Don't use `--allow-unlisted` to "fix" an unknown-category error. Pick a
+  name from `outlook categories` or ask the user.
 - Don't suggest installation or configuration steps. The CLI is either on
   PATH or it isn't.
 

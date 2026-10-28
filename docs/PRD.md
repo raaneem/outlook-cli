@@ -53,7 +53,9 @@ those actions would be allowed by their organisation's policy.
 ## 3. Non-goals
 
 - Multi-user / multi-mailbox support. This is single-user automation
-  for the signed-in account.
+  for the signed-in account. (Fork addition: `--mailbox` reaches shared
+  mailboxes the signed-in user can already open — still one account, one
+  token; see `docs/usage.md`.)
 - A graphical UI. Output is JSON; humans use `jq` and AI agents
   consume it directly.
 - Bypassing any genuine access control. If the user can't sign into

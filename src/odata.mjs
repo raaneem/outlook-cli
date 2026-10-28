@@ -24,6 +24,20 @@ const WELL_KNOWN_FOLDERS = {
 };
 
 /**
+ * Canonical well-known folder name ("Inbox", "SentItems", …) for a friendly
+ * alias -- case-insensitive, spaces ignored -- or null if it is not one.
+ */
+export function wellKnownFolder(input) {
+  const normalized = String(input).toLowerCase().replace(/\s+/g, '');
+  return WELL_KNOWN_FOLDERS[normalized] ?? null;
+}
+
+/** Whether `input` looks like an opaque folder Id (≥ 30 chars of base64-ish). */
+export function looksLikeFolderId(input) {
+  return /^[A-Za-z0-9_=+/-]{30,}$/.test(input);
+}
+
+/**
  * Resolve a user-supplied folder argument to a REST path segment usable in
  * `/mailfolders/{id}/messages`.
  *
@@ -34,9 +48,9 @@ const WELL_KNOWN_FOLDERS = {
  *   output and pick an Id manually.
  */
 export function resolveFolder(input) {
-  const normalized = input.toLowerCase().replace(/\s+/g, '');
-  if (WELL_KNOWN_FOLDERS[normalized]) return WELL_KNOWN_FOLDERS[normalized];
-  if (/^[A-Za-z0-9_=+/-]{30,}$/.test(input)) return input;
+  const known = wellKnownFolder(input);
+  if (known) return known;
+  if (looksLikeFolderId(input)) return input;
   throw new AppError({
     code: E.ARGS,
     message: `Unknown folder: ${input}`,

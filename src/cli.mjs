@@ -6,7 +6,8 @@
 //   - stdout: command result (JSON), pretty-printed when on a TTY, compact
 //     when piped — so `outlook list | jq …` Just Works.
 //   - stderr: diagnostics, progress, errors. Never pollutes stdout.
-//   - Exit codes: 0 ok, 1 generic, 2 auth, 3 HTTP, 64 usage, 130 SIGINT.
+//   - Exit codes: 0 ok, 1 generic, 2 auth, 3 HTTP, 4 precondition, 64 usage,
+//     130 SIGINT.
 //   - Errors carry trackable codes (E_AUTH_*, E_HTTP, E_ARGS) + actionable hints.
 //   - STDIN: `send` accepts message JSON via STDIN when no arg is given.
 
@@ -25,6 +26,22 @@ import { printJson, info, errorBlock, debug } from './output.mjs';
 import { AppError, E, EXIT, exitCodeFor } from './errors.mjs';
 import { buildFilter, buildQuery, resolveFolder, parseCount } from './odata.mjs';
 import { RESOURCES } from './resources.mjs';
+import { parseMailbox } from './mailbox.mjs';
+import {
+  parseMessageIds,
+  runMessageBatch,
+  validateMessageId,
+  isMissingItem,
+} from './actions.mjs';
+import { DRAFT_SELECT, draftPreview, assertSendable } from './send-draft.mjs';
+import { resolveDestination } from './folders.mjs';
+import {
+  parseCategoryChange,
+  loadMasterCategories,
+  resolveCategoryNames,
+  applyCategoryChange,
+  sameCategories,
+} from './categories.mjs';
 import { auditAll } from './audit.mjs';
 import {
   resolveEventRange,
@@ -45,8 +62,8 @@ import {
   validateAttachPath,
 } from './attachments.mjs';
 
-/** Commander collector for repeated --attach options. */
-function collectAttach(value, previous) {
+/** Commander collector for repeatable options (--attach, --add, --remove, --set). */
+function collect(value, previous) {
   return previous ? previous.concat([value]) : [value];
 }
 
@@ -115,12 +132,20 @@ function httpErrorHint(body) {
 }
 
 function httpError(res, method, path) {
+  const serverCode = res.body?.error?.code;
   return new AppError({
     code: E.HTTP,
     message: `${method} ${path.split('?')[0]} returned HTTP ${res.status}.`,
     hint: httpErrorHint(res.body),
+    status: res.status,
+    ...(typeof serverCode === 'string' ? { serverCode } : {}),
   });
 }
+
+// The mailbox every Outlook call in this invocation targets: null for the
+// signed-in user's own (/me), or the SMTP address given via --mailbox. Set
+// once by the preAction hook, before any command runs.
+let activeMailbox = null;
 
 /**
  * Authenticated API call with automatic 401 recovery: if the cached token
@@ -132,18 +157,30 @@ function httpError(res, method, path) {
  * "outlook"). For non-default resources, getAuth() will not silently open
  * the browser — it errors with a `outlook auth --all` hint instead — so a
  * `graph` call never pops Chromium unexpectedly.
+ *
+ * Outlook calls go to --mailbox when one was given. Other resources refuse
+ * it up front, before any token lookup, so the error is about the flag
+ * rather than a missing Graph token.
  */
 async function runApi(path, init = {}) {
   const method = init.method ?? 'GET';
   const res_ = init.resource ?? 'outlook';
+  if (activeMailbox && res_ !== 'outlook') {
+    throw new AppError({
+      code: E.ARGS,
+      message: `--mailbox applies to Outlook mail and calendar only, not ${res_}.`,
+      hint: 'Drop --mailbox for Graph, Teams and Substrate commands.',
+    });
+  }
+  const callInit = activeMailbox ? { ...init, mailbox: activeMailbox } : init;
   let auth = await getAuth({ resource: res_ });
-  let res = await call(auth, path, init);
+  let res = await call(auth, path, callInit);
 
   if (res.status === 401) {
     debug(`cached ${res_} token rejected (401); recapturing and retrying`);
     clearAuth(res_);
     auth = await getAuth({ resource: res_ });
-    res = await call(auth, path, init);
+    res = await call(auth, path, callInit);
     if (res.status === 401) {
       clearAuth(res_);
       throw new AppError({
@@ -215,9 +252,21 @@ program
   )
   .version(pkg.version, '-V, --version', 'print the CLI version')
   .option('--debug', 'verbose diagnostic output to stderr')
+  .option(
+    '--mailbox <address>',
+    'act on a shared or delegated mailbox (SMTP address) instead of your own',
+    // Collected so a repeated flag with a different address is caught,
+    // instead of the last one silently winning.
+    collect,
+  )
   .hook('preAction', (cmd) => {
-    if (cmd.optsWithGlobals().debug) process.env.OUTLOOK_DEBUG = '1';
+    const opts = cmd.optsWithGlobals();
+    if (opts.debug) process.env.OUTLOOK_DEBUG = '1';
+    // Commander accepts a root option before or after the subcommand, so
+    // `outlook --mailbox x list` and `outlook list --mailbox x` both land here.
+    activeMailbox = parseMailbox(opts.mailbox);
     debug(`outlook ${pkg.version}, node ${process.version}`);
+    if (activeMailbox) debug(`mailbox ${activeMailbox}`);
   });
 
 program
@@ -489,6 +538,9 @@ program
 
     printJson({
       user,
+      // `user` is who is signed in; with --mailbox, commands act on this
+      // mailbox instead. Reported so an agent never conflates the two.
+      mailbox: activeMailbox,
       tokenMinutesUntilExpiry,
       learnings: loadLearnings(),
       learningsFile: learningsFile(),
@@ -818,11 +870,231 @@ program
 
 program
   .command('folders')
-  .description('List mail folders.')
-  .action(async () => {
-    const body = await runApi('/mailfolders');
+  .description('List mail folders: the top level, or the subfolders of --parent.')
+  // Without $top the server returns only its default page of 10, which
+  // silently hides folders in larger (often shared) mailboxes.
+  .option('-n, --top <count>', 'how many folders to fetch', '100')
+  .option('-s, --skip <count>', 'pagination offset')
+  .option('--parent <folder>', 'list subfolders of this folder: a name, a path like "Inbox/Projects", or an Id')
+  .action(async (opts) => {
+    let base = '/mailfolders';
+    if (opts.parent) {
+      const parent = await resolveDestination(runApi, opts.parent, { mailbox: activeMailbox });
+      base = `/mailfolders/${encodeURIComponent(parent.id)}/childfolders`;
+    }
+    const body = await runApi(base + buildQuery({ top: opts.top, skip: opts.skip }));
     printJson(body);
   });
+
+// ---------------------------------------------------------------------------
+// Organising mail: commands that change existing messages. They share the
+// preflight-then-apply runner in actions.mjs, take ids as arguments or on
+// STDIN, support --dry-run, and print one JSON result per call.
+
+const JSON_HEADERS = { 'Content-Type': 'application/json' };
+const DRY_RUN_HELP = 'show what would change, without changing anything';
+const IDS_HELP = 'message Ids (from `outlook list`); read from STDIN when omitted';
+
+const messagePath = (id) => `/messages/${encodeURIComponent(id)}`;
+
+/** STDIN text for an id list -- read only when no ids were passed as arguments. */
+async function idsInput(args) {
+  return args.length > 0 || process.stdin.isTTY ? '' : readStdin();
+}
+
+/**
+ * Print a batch result, then throw if anything failed so the exit code says
+ * so too. The JSON on stdout always carries the per-message detail.
+ */
+function finishBatch(result) {
+  printJson(result);
+  if (result.ok) return;
+  const failures = result.items.filter((item) => item.error);
+  const first = failures[0].error;
+  const allMissing = failures.every((item) => item.status === 'not-found');
+  const where = result.mailbox ?? 'your mailbox';
+  let hint = first.hint;
+  if (allMissing) {
+    hint =
+      first.serverCode === 'ErrorInvalidMailboxItemId'
+        ? 'The id belongs to a different mailbox. Pass the same --mailbox the id was listed from.'
+        : `Not found in ${where}: deleted, or moved (a move gives a message a new Id). List again for fresh ids.`;
+  }
+  const summary = result.aborted
+    ? `${failures.length} of ${result.counts.requested} message(s) could not be loaded, so nothing was changed`
+    : `${result.counts.failed} of ${result.counts.requested} message(s) failed`;
+  throw new AppError({
+    code: allMissing ? E.PRECONDITION : first.code,
+    message: `${result.command}: ${summary}. First error: ${first.message}`,
+    hint: `${hint ? `${hint} ` : ''}Per-message results are in the JSON on stdout.`,
+  });
+}
+
+for (const [name, isRead] of [
+  ['mark-read', true],
+  ['mark-unread', false],
+]) {
+  const state = isRead ? 'read' : 'unread';
+  program
+    .command(name)
+    .argument('[ids...]', IDS_HELP)
+    .option('--dry-run', DRY_RUN_HELP)
+    .description(
+      `Mark messages as ${state}; messages already ${state} are skipped.\n` +
+        'In a shared mailbox, read state is shared by everyone who uses it.',
+    )
+    .action(async (args, opts) => {
+      const ids = parseMessageIds(args, await idsInput(args));
+      const result = await runMessageBatch({
+        command: name,
+        ids,
+        mailbox: activeMailbox,
+        dryRun: !!opts.dryRun,
+        load: (id) => runApi(`${messagePath(id)}?$select=Id,Subject,IsRead`),
+        plan: (message, id) =>
+          message.IsRead === isRead
+            ? { skip: `already-${state}` }
+            : {
+                before: { isRead: message.IsRead ?? null },
+                after: { isRead },
+                apply: async () => {
+                  await runApi(messagePath(id), {
+                    method: 'PATCH',
+                    headers: JSON_HEADERS,
+                    body: JSON.stringify({ IsRead: isRead }),
+                  });
+                },
+              },
+      });
+      finishBatch(result);
+    });
+}
+
+/**
+ * Shared body of `move` and `archive`. The destination is resolved before
+ * preflight, so an unknown folder fails before any message is read.
+ */
+async function moveMessages(command, args, spec, opts) {
+  const ids = parseMessageIds(args, await idsInput(args));
+  const destination = await resolveDestination(runApi, spec, { mailbox: activeMailbox });
+  const result = await runMessageBatch({
+    command,
+    ids,
+    mailbox: activeMailbox,
+    dryRun: !!opts.dryRun,
+    extra: { destination },
+    load: (id) => runApi(`${messagePath(id)}?$select=Id,Subject,ParentFolderId`),
+    plan: (message, id) =>
+      message.ParentFolderId === destination.id
+        ? { skip: 'already-in-destination' }
+        : {
+            before: { folderId: message.ParentFolderId ?? null },
+            after: { folderId: destination.id },
+            // Ids are not immutable here: the moved message has a new Id,
+            // and the old one stops working (LEARNINGS.md section 16).
+            apply: async () => {
+              const moved = await runApi(`${messagePath(id)}/move`, {
+                method: 'POST',
+                headers: JSON_HEADERS,
+                body: JSON.stringify({ DestinationId: destination.id }),
+              });
+              return { newId: moved?.Id ?? null };
+            },
+          },
+  });
+  finishBatch(result);
+}
+
+program
+  .command('move')
+  .argument('[ids...]', IDS_HELP)
+  .requiredOption(
+    '--to <folder>',
+    'destination: Inbox, Archive, Deleted, Junk, … , a path like "Inbox/Projects", or a folder Id',
+  )
+  .option('--dry-run', DRY_RUN_HELP)
+  .description(
+    'Move messages to another folder. A moved message gets a NEW Id (returned\n' +
+      'as `newId`); the old Id stops working. Messages already there are skipped.',
+  )
+  .action((args, opts) => moveMessages('move', args, opts.to, opts));
+
+program
+  .command('archive')
+  .argument('[ids...]', IDS_HELP)
+  .option('--dry-run', DRY_RUN_HELP)
+  .description(
+    "Move messages to the mailbox's Archive folder (what OWA's Archive button\n" +
+      'does; not the online-archive mailbox). Same output as `move`.',
+  )
+  .action((args, opts) => moveMessages('archive', args, 'archive', opts));
+
+program
+  .command('categories')
+  .description("List the mailbox's master categories: the names `categorize` accepts.")
+  .action(async () => {
+    printJson(await runApi('/MasterCategories'));
+  });
+
+program
+  .command('categorize')
+  .argument('[ids...]', IDS_HELP)
+  .option('--add <name>', 'add a category, keeping existing ones (repeatable)', collect)
+  .option('--remove <name>', 'remove a category, matched case-insensitively (repeatable)', collect)
+  .option('--set <name>', 'replace all categories with these (repeatable)', collect)
+  .option('--clear', 'remove every category')
+  .option('--allow-unlisted', "accept --add/--set names that are not in the mailbox's master list")
+  .option('--dry-run', DRY_RUN_HELP)
+  .description(
+    'Add, remove, or replace Outlook categories on messages. --add/--set names\n' +
+      "must be in the mailbox's master list (`outlook categories`) and are written\n" +
+      'in its exact spelling; unknown names are refused unless --allow-unlisted.',
+  )
+  .action(async (args, opts) => {
+    const change = parseCategoryChange(opts);
+    const ids = parseMessageIds(args, await idsInput(args));
+    const where = activeMailbox ?? 'your mailbox';
+    // Only names being written need the master list; removing and clearing
+    // work even where the list cannot be read.
+    const writesNames = change.add.length > 0 || (change.set?.length ?? 0) > 0;
+    const master =
+      opts.allowUnlisted || !writesNames ? null : await loadMasterCategories(runApi, where);
+    const resolved = resolveCategoryNames(change, master, where);
+    const result = await runMessageBatch({
+      command: 'categorize',
+      ids,
+      mailbox: activeMailbox,
+      dryRun: !!opts.dryRun,
+      extra: { change: resolved },
+      load: (id) => runApi(`${messagePath(id)}?$select=Id,Subject,Categories`),
+      plan: (message, id) => {
+        const before = message.Categories ?? [];
+        const after = applyCategoryChange(before, resolved);
+        if (sameCategories(before, after)) return { skip: 'no-change' };
+        return {
+          before: { categories: before },
+          after: { categories: after },
+          // PATCH replaces the whole list; add/remove were computed above
+          // from the preflight read.
+          apply: async () => {
+            await runApi(messagePath(id), {
+              method: 'PATCH',
+              headers: JSON_HEADERS,
+              body: JSON.stringify({ Categories: after }),
+            });
+          },
+        };
+      },
+    });
+    finishBatch(result);
+  });
+
+/** Where a new draft went -- with --mailbox it is the shared mailbox's Drafts. */
+function draftSavedMessage() {
+  return activeMailbox
+    ? `Draft saved to the Drafts folder of ${activeMailbox}. Open that mailbox in Outlook to review and send.`
+    : 'Draft saved to your Drafts folder. Open Outlook to review and send.';
+}
 
 /**
  * Common implementation for draft-* commands.
@@ -906,14 +1178,15 @@ async function makeDraftFrom(messageId, action, overridesJson, attachPaths = [])
     WebLink: draft.WebLink ?? null,
     ConversationId: draft.ConversationId ?? null,
     Attachments: attached,
-    message: 'Draft saved to your Drafts folder. Open Outlook to review and send.',
+    Mailbox: activeMailbox,
+    message: draftSavedMessage(),
   };
 }
 
 program
   .command('draft')
   .argument('[json]', 'Outlook Message JSON; reads STDIN if omitted')
-  .option('-a, --attach <path>', 'attach a local file (repeatable, ≤3MB each)', collectAttach)
+  .option('-a, --attach <path>', 'attach a local file (repeatable, ≤3MB each)', collect)
   .description(
     'Create a new draft (does NOT send). Same JSON shape as `send`. The\n' +
       'draft appears in your Drafts folder for review.',
@@ -938,7 +1211,8 @@ program
       DraftId: body.Id,
       WebLink: body.WebLink ?? null,
       Attachments: attached,
-      message: 'Draft saved to your Drafts folder. Open Outlook to review and send.',
+      Mailbox: activeMailbox,
+      message: draftSavedMessage(),
     });
   });
 
@@ -949,7 +1223,7 @@ program
     '[json]',
     'partial Message override (e.g. {"Body":{"ContentType":"Text","Content":"…"}}); reads STDIN if omitted',
   )
-  .option('-a, --attach <path>', 'attach a local file (repeatable, ≤3MB each)', collectAttach)
+  .option('-a, --attach <path>', 'attach a local file (repeatable, ≤3MB each)', collect)
   .description(
     'Create a draft reply to a message. Outlook automatically fills in the\n' +
       'quoted thread; your override JSON sets the new body or extra recipients.',
@@ -963,7 +1237,7 @@ program
   .command('draft-reply-all')
   .argument('<id>', 'message Id to reply-all to')
   .argument('[json]', 'partial Message override; STDIN if omitted')
-  .option('-a, --attach <path>', 'attach a local file (repeatable, ≤3MB each)', collectAttach)
+  .option('-a, --attach <path>', 'attach a local file (repeatable, ≤3MB each)', collect)
   .description('Like `draft-reply`, but addresses everyone on the original thread.')
   .action(async (id, jsonArg, opts) => {
     const raw = jsonArg ?? (process.stdin.isTTY ? '' : await readStdin());
@@ -974,7 +1248,7 @@ program
   .command('draft-forward')
   .argument('<id>', 'message Id to forward')
   .argument('[json]', 'partial Message override (typically ToRecipients + Body); STDIN if omitted')
-  .option('-a, --attach <path>', 'attach a local file (repeatable, ≤3MB each)', collectAttach)
+  .option('-a, --attach <path>', 'attach a local file (repeatable, ≤3MB each)', collect)
   .description('Create a draft forward of a message.')
   .action(async (id, jsonArg, opts) => {
     const raw = jsonArg ?? (process.stdin.isTTY ? '' : await readStdin());
@@ -998,7 +1272,7 @@ program
     '[json]',
     'message JSON (Outlook REST "Message" resource); reads STDIN if omitted',
   )
-  .option('-a, --attach <path>', 'attach a local file (repeatable, ≤3MB each)', collectAttach)
+  .option('-a, --attach <path>', 'attach a local file (repeatable, ≤3MB each)', collect)
   .description(
     'Send a message.\n' +
       'Example STDIN payload:\n' +
@@ -1018,6 +1292,108 @@ program
     });
     // sendmail returns 202 with no body on success.
     printJson(body || { sent: true });
+  });
+
+// ---------------------------------------------------------------------------
+// Sending a reviewed draft. Two steps by design: `--dry-run` prints the draft
+// and its ChangeKey for the user to approve; the real send must quote that
+// ChangeKey and is refused if the draft changed in between (send-draft.mjs).
+
+// A send is not worth even a small risk of going out twice: retry only
+// throttling (429, which Exchange rejects unprocessed), never a 503.
+const THROTTLE_ONLY = new Set([429]);
+
+/** Whether the draft still sits in Drafts: true / false, or null if unknown. */
+async function draftStillInDrafts(id, draftsFolderId) {
+  try {
+    const draft = await runApi(`${messagePath(id)}?$select=Id,ParentFolderId`);
+    return draft?.ParentFolderId === draftsFolderId;
+  } catch (err) {
+    return isMissingItem(err) ? false : null;
+  }
+}
+
+program
+  .command('send-draft')
+  .argument('<id>', 'draft Id (DraftId from draft / draft-reply / …, or from `list --folder Drafts`)')
+  .option('--dry-run', 'print the draft that would be sent and its changeKey; send nothing')
+  .option('--expect-change-key <key>', 'send only if the draft still has this changeKey (from --dry-run)')
+  .option('--max-recipients <n>', 'refuse to send to more than n recipients (To + Cc + Bcc)')
+  .description(
+    'Send an existing draft. **Sends immediately and cannot be undone.**\n' +
+      'Step 1: `send-draft <id> --dry-run` prints the draft and its changeKey.\n' +
+      'Step 2, after the user approves it: `send-draft <id> --expect-change-key <key>`.\n' +
+      'Refused if the draft changed in between, is not in Drafts, or has no recipients.',
+  )
+  .action(async (rawId, opts) => {
+    const id = validateMessageId(rawId);
+    if (!opts.dryRun && opts.expectChangeKey === undefined) {
+      throw new AppError({
+        code: E.ARGS,
+        message: 'send-draft needs --expect-change-key (or --dry-run to preview first).',
+        hint: 'Run `outlook send-draft <id> --dry-run`, show the preview to the user, then pass its changeKey.',
+      });
+    }
+    const maxRecipients =
+      opts.maxRecipients === undefined ? null : parseCount(opts.maxRecipients, '--max-recipients');
+    const where = activeMailbox ?? 'your mailbox';
+
+    let draft;
+    try {
+      draft = await runApi(`${messagePath(id)}?$select=${DRAFT_SELECT}`);
+    } catch (err) {
+      if (!isMissingItem(err)) throw err;
+      throw new AppError({
+        code: E.PRECONDITION,
+        message: `Draft not found in ${where}: ${id}`,
+        hint:
+          err.serverCode === 'ErrorInvalidMailboxItemId'
+            ? 'The id belongs to a different mailbox. Pass the same --mailbox the draft was created with.'
+            : 'It may already have been sent or deleted. Check Sent Items before doing anything else.',
+      });
+    }
+    const drafts = await runApi('/mailfolders/Drafts?$select=Id');
+    const attachments = draft.HasAttachments
+      ? ((await runApi(`${messagePath(id)}/attachments?$select=Name,Size,ContentType,IsInline`))
+          ?.value ?? [])
+      : [];
+    const preview = draftPreview(draft, attachments);
+    assertSendable(draft, {
+      draftsFolderId: drafts?.Id,
+      expectChangeKey: opts.expectChangeKey,
+      maxRecipients,
+      where,
+    });
+
+    const result = {
+      ok: true,
+      command: 'send-draft',
+      mode: opts.dryRun ? 'dry-run' : 'apply',
+      mailbox: activeMailbox,
+      draft: preview,
+    };
+    if (opts.dryRun) {
+      printJson({ ...result, sent: false });
+      return;
+    }
+
+    try {
+      await runApi(`${messagePath(id)}/send`, { method: 'POST', retryStatuses: THROTTLE_ONLY });
+    } catch (err) {
+      if (!(err instanceof AppError) || err.code !== E.NETWORK) throw err;
+      // The request may or may not have reached Exchange. Look; never resend.
+      const stillThere = await draftStillInDrafts(id, drafts?.Id);
+      printJson({ ...result, ok: false, sent: null, outcome: 'unknown', draftStillInDrafts: stillThere });
+      throw new AppError({
+        code: E.NETWORK,
+        message: `The send request for ${id} failed mid-flight; it may or may not have gone out.`,
+        hint:
+          stillThere === false
+            ? 'The draft is no longer in Drafts, so it was most likely sent. Check Sent Items; do NOT resend.'
+            : 'Check Sent Items before trying again; a blind retry could send it twice.',
+      });
+    }
+    printJson({ ...result, sent: true });
   });
 
 // ---------------------------------------------------------------------------

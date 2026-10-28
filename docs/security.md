@@ -37,13 +37,15 @@ using it on anything you care about.
 
 | Path | Sensitivity |
 | --- | --- |
-| `~/.cache/outlook-spike/auth.json` | Contains a JWT with read+send access to your mailbox. Anyone who reads this file can act as you for ~24h. |
+| `~/.cache/outlook-spike/auth.json` | Contains a JWT with read+send access to your mailbox **and to every shared mailbox you can open** (the OWA token carries `Mail.ReadWrite.Shared` and `Mail.Send.Shared`). Anyone who reads this file can act as you for ~24h. |
 | `~/.cache/outlook-spike/auth-graph.json` | Present after `auth --all`. A Microsoft Graph token — read your Teams, Files, People, and directory, and send Teams messages. Shorter-lived (minutes) but a broader blast radius than the mail token. |
 | `~/.cache/outlook-spike/auth-substrate.json` | Present after `auth --all`. A Substrate token (Copilot / unified search). Short-lived. |
 | `~/.local/share/outlook-spike/browser-profile/` | Contains SSO cookies. Anyone with this directory can sign in as you without MFA. |
 | `~/.local/share/outlook-spike/learnings.md` | Free-form notes the AI agent has accumulated. May contain names, email addresses, project names, and habits. Plain-text markdown; user-editable. |
 
-These are stored with default user-only permissions. **Don't share them.
+The token caches are written owner-only (`0600`); a cache left
+world-readable by an older version is tightened on the next capture. The
+browser profile and learnings file use your default permissions. **Don't share them.
 Don't sync them to cloud storage. Don't commit them.** The repo `.gitignore`
 protects against `auth.json` and any `auth-*.json` filename (the per-resource
 caches) landing in-tree, but cloud-drive sync (iCloud Desktop, OneDrive,
@@ -116,6 +118,23 @@ aware of:
 The SKILL.md tells every agent that loads it to confirm with the user
 before any of those three operations on attendee-bearing events.
 
+## Mail-changing commands and shared mailboxes
+
+`--mailbox` reaches every shared mailbox your account can open, with the
+same token — so the CLI can read, change, and (given Send As / Send on
+Behalf) send mail *as that mailbox*. The guard rails:
+
+| Operation | Side effect | Guard rail |
+| --- | --- | --- |
+| `mark-read`, `move`, `archive`, `categorize` | Visible to everyone who uses the mailbox (read state and categories are shared) | Every id is preflighted; if any is missing nothing changes. `--dry-run` sends only reads. No hard delete exists. |
+| `send-draft` | Mail leaves **immediately and irreversibly**, from the target mailbox | Two steps: `--dry-run` preview, then a send that must quote the preview's `changeKey` and is refused if the draft changed. Only unsent drafts in Drafts are sent; a 503 is never retried; a dropped connection is reported, never resent. |
+| `send` | Mail leaves immediately | Confirm recipient, subject, body with the user (SKILL.md). |
+
+For automation, two environment brakes are enforced at the lowest layer
+(`client.call`), so no command can bypass them: `OUTLOOK_READ_ONLY=1`
+refuses every write, and `OUTLOOK_NO_SEND=1` refuses mail submission
+while still allowing drafts and organising.
+
 ## Self-learning behaviour
 
 The CLI maintains a `learnings.md` file the AI agent reads at session
@@ -148,10 +167,9 @@ intent is to let your agent improve over time — knowing aliases like
 
 ## Open security questions / unfinished work
 
-- The token cache is plaintext JSON. A future version should at least file-
-  permission-restrict it to `0600` explicitly and ideally seal it with the
-  macOS keychain via `security add-generic-password` so reading requires a
-  Touch ID prompt.
+- The token cache is plaintext JSON (owner-only, `0600`). Ideally it would
+  be sealed with the macOS keychain via `security add-generic-password` so
+  reading requires a Touch ID prompt.
 - The browser profile inherits Chromium's default permission model.
   Sandboxing it inside a separate user account would be a defence-in-depth
   improvement but is outside the scope of a CLI tool.
