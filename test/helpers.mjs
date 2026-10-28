@@ -110,6 +110,34 @@ export function startMockServer(handler) {
 }
 
 /**
+ * Environment every CLI run starts from: layered over process.env, under
+ * the test's own `env`. A developer machine has a real token cache and a
+ * real network, so a test that forgets to pin a cache path or an API base
+ * must land on an empty tmp dir and a closed local port -- never read the
+ * real token, and never reach Microsoft with it.
+ */
+function isolatedEnv() {
+  const root = mkdtempSync(join(tmpdir(), 'outlook-run-'));
+  const dead = 'http://127.0.0.1:9';
+  return {
+    OUTLOOK_NO_CAPTURE: '1',
+    OUTLOOK_CAPTURE_FIXTURE: '',
+    XDG_CACHE_HOME: join(root, 'cache'),
+    XDG_DATA_HOME: join(root, 'data'),
+    OUTLOOK_TOKEN_CACHE: join(root, 'cache', 'auth.json'),
+    OUTLOOK_TOKEN_CACHE_GRAPH: join(root, 'cache', 'auth-graph.json'),
+    OUTLOOK_TOKEN_CACHE_SUBSTRATE: join(root, 'cache', 'auth-substrate.json'),
+    OUTLOOK_LEARNINGS: join(root, 'data', 'learnings.md'),
+    OUTLOOK_PROFILE: join(root, 'data', 'browser-profile'),
+    OUTLOOK_API_BASE: `${dead}/api/v2.0/me`,
+    OUTLOOK_GRAPH_BASE: `${dead}/graph/v1.0`,
+    OUTLOOK_SUBSTRATE_BASE: `${dead}/substrate`,
+    OUTLOOK_DEBUG: '',
+    DEBUG: '',
+  };
+}
+
+/**
  * Spawn the CLI as a subprocess. Returns `{ code, stdout, stderr }`.
  * Pass `env` to add/override environment variables for that run.
  *
@@ -120,7 +148,7 @@ export function startMockServer(handler) {
 export function runCli(args, { env = {}, stdin = null, timeoutMs = 15_000 } = {}) {
   return new Promise((resolveRun, reject) => {
     const child = spawn(process.execPath, [CLI_PATH, ...args], {
-      env: { OUTLOOK_NO_CAPTURE: '1', ...process.env, ...env },
+      env: { ...process.env, ...isolatedEnv(), ...env },
       stdio: ['pipe', 'pipe', 'pipe'],
     });
     let stdout = '';
