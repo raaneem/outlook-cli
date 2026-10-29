@@ -207,6 +207,10 @@ export async function startFakeMailbox(mailboxes, { faults = {} } = {}) {
           msg.Id = `${msg.Id}M${++seq}`;
           return reply(res, 201, msg);
         }
+        if (req.method === 'DELETE' && !action) {
+          box.messages.splice(box.messages.indexOf(msg), 1);
+          return reply(res, 204);
+        }
         if (req.method === 'POST' && action === 'send') {
           msg.ParentFolderId = folderBy(box, 'SentItems')?.Id ?? null;
           msg.IsDraft = false;

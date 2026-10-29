@@ -23,7 +23,7 @@ test('--version prints semver to stdout, exits 0', async () => {
 test('--help lists all commands', async () => {
   const { code, stdout } = await runCli(['--help']);
   assert.equal(code, 0);
-  for (const cmd of ['auth', 'refresh', 'logout', 'list', 'search', 'read', 'folders', 'send', 'mark-read', 'mark-unread', 'move', 'archive', 'categories', 'categorize', 'send-draft']) {
+  for (const cmd of ['auth', 'refresh', 'logout', 'list', 'search', 'read', 'folders', 'send', 'mark-read', 'mark-unread', 'move', 'archive', 'delete', 'categories', 'categorize', 'send-draft']) {
     assert.match(stdout, new RegExp(`^\\s*${cmd}\\b`, 'm'), `expected to see "${cmd}" in help`);
   }
 });
@@ -688,10 +688,15 @@ test('draft-forward hits createForward', async () => {
   }
 });
 
-test('discard-draft DELETEs the message and prints a success payload', async () => {
-  let observed = null;
+test('discard-draft checks it is a draft, DELETEs it, and prints a success payload', async () => {
+  const observed = [];
   const mock = await startMockServer((req, res) => {
-    observed = { method: req.method, url: req.url };
+    observed.push({ method: req.method, url: req.url });
+    if (req.method === 'GET') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ Id: 'DRAFT-XYZ', IsDraft: true }));
+      return;
+    }
     res.writeHead(204);
     res.end();
   });
@@ -703,8 +708,11 @@ test('discard-draft DELETEs the message and prints a success payload', async () 
       },
     });
     assert.equal(code, 0);
-    assert.equal(observed.method, 'DELETE');
-    assert.equal(observed.url, '/api/v2.0/me/messages/DRAFT-XYZ');
+    assert.deepEqual(
+      observed.map((r) => r.method),
+      ['GET', 'DELETE'],
+    );
+    assert.equal(observed[1].url, '/api/v2.0/me/messages/DRAFT-XYZ');
     assert.deepEqual(JSON.parse(stdout), { discarded: true, DraftId: 'DRAFT-XYZ' });
   } finally {
     await mock.close();

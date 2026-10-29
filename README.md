@@ -30,7 +30,7 @@ $ outlook list -n 3 | jq '.value[] | {From: .From.EmailAddress.Name, Subject}'
 | --- | --- | --- |
 | **Mail — read** | `list`, `unread`, `search`, `read`, `folders` | Friendly filters (`--unread`, `--from`, `--since 7d`, `--folder Sent`, `--has-attachments`, …) or raw OData |
 | **Mail — write** | `draft`, `draft-reply`, `draft-reply-all`, `draft-forward`, `discard-draft`, `send-draft`, `send` | Review-first drafts preferred over direct `send`; `send-draft` sends a reviewed draft only if it's unchanged since its preview; `--attach` files (≤3 MB) |
-| **Mail — organise** | `mark-read`, `mark-unread`, `move`, `archive`, `categorize`, `categories` | Batch ids (args or STDIN), preflight before any write, `--dry-run`, one JSON result per call; category names checked against the mailbox's master list |
+| **Mail — organise** | `mark-read`, `mark-unread`, `move`, `archive`, `delete`, `categorize`, `categories` | Batch ids (args or STDIN), preflight before any write, `--dry-run`, one JSON result per call; category names checked against the mailbox's master list |
 | **Calendar** | `agenda`, `events`, `event-read`, `calendars`, `event-create`, `event-update`, `event-cancel`, `accept`/`decline`/`tentative`, `free-busy` | Natural time ranges (`today`, `+7d`, `--days 14`); RSVP; availability lookup |
 | **Shared mailboxes** | `--mailbox <address>` on any mail / calendar command | Uses your delegated access (Full Access, Send As) with the same token — see [`docs/usage.md`](./docs/usage.md#shared-mailboxes---mailbox) |
 | **Teams** (via Graph) | `teams`, `teams-channels`, `teams-chats`, `teams-members`, `teams-messages`, `teams-send` | Needs `outlook auth --all`. Listing + sending work; reading message bodies needs `Chat.Read` (may be tenant-blocked) |
