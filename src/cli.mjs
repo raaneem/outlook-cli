@@ -1030,6 +1030,18 @@ program
   .action((args, opts) => moveMessages('archive', args, 'archive', opts));
 
 program
+  .command('delete')
+  .argument('[ids...]', IDS_HELP)
+  .option('--dry-run', DRY_RUN_HELP)
+  .description(
+    'Delete messages: move them to Deleted Items, like the Delete key in Outlook.\n' +
+      'Recoverable from there; nothing is permanently deleted. Same output as\n' +
+      '`move` (a deleted message gets a new Id); messages already in Deleted\n' +
+      'Items are skipped.',
+  )
+  .action((args, opts) => moveMessages('delete', args, 'deleted', opts));
+
+program
   .command('categories')
   .description("List the mailbox's master categories: the names `categorize` accepts.")
   .action(async () => {
@@ -1258,11 +1270,39 @@ program
 program
   .command('discard-draft')
   .argument('<id>', 'draft Id to delete')
-  .description('Permanently delete a draft.')
-  .action(async (id) => {
+  .description(
+    'Permanently delete an unsent draft. Refuses anything that is not a draft;\n' +
+      'to delete a message, use `outlook delete` (moves it to Deleted Items).',
+  )
+  .action(async (rawId) => {
+    const id = validateMessageId(rawId);
+    const where = activeMailbox ?? 'your mailbox';
+    let draft;
+    try {
+      draft = await runApi(`${messagePath(id)}?$select=Id,IsDraft`);
+    } catch (err) {
+      if (!isMissingItem(err)) throw err;
+      throw new AppError({
+        code: E.PRECONDITION,
+        message: `Draft not found in ${where}: ${id}`,
+        hint:
+          err.serverCode === 'ErrorInvalidMailboxItemId'
+            ? 'The id belongs to a different mailbox. Pass the same --mailbox the draft was created with.'
+            : 'It may already have been sent or discarded.',
+      });
+    }
+    // DELETE is permanent, so it is reserved for unsent drafts. Received mail
+    // goes through `delete`, which keeps it recoverable in Deleted Items.
+    if (draft.IsDraft !== true) {
+      throw new AppError({
+        code: E.PRECONDITION,
+        message: `Not a draft: ${id}`,
+        hint: 'discard-draft only removes unsent drafts. To delete a message, use `outlook delete <id>`.',
+      });
+    }
     // 204 No Content on success; runApi treats that as a non-error and returns
     // an empty body. We synthesise the success payload ourselves.
-    await runApi(`/messages/${encodeURIComponent(id)}`, { method: 'DELETE' });
+    await runApi(messagePath(id), { method: 'DELETE' });
     printJson({ discarded: true, DraftId: id });
   });
 

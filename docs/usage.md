@@ -309,11 +309,11 @@ outlook --mailbox shared@example.com mark-unread "$ID"
 
 In a shared mailbox, read state is shared by everyone who uses it.
 
-### `outlook move <ids…> --to <folder>` / `outlook archive <ids…>`
+### `outlook move <ids…> --to <folder>` / `outlook archive <ids…>` / `outlook delete <ids…>`
 
 ```bash
 outlook archive "$ID"                                  # = move --to Archive
-outlook move "$ID" --to Deleted                        # soft delete (Deleted Items)
+outlook delete "$ID"                                   # = move --to Deleted (Deleted Items)
 outlook move "$ID" --to "Inbox/Projects/2026"          # folder path, case-insensitive
 outlook move "$ID" --to AAMkAD…                        # folder Id from `outlook folders`
 outlook --mailbox shared@example.com archive "$ID" --dry-run
@@ -329,7 +329,10 @@ outlook --mailbox shared@example.com archive "$ID" --dry-run
   Id stops working. Do any `mark-read` / `categorize` first, then move.
 - `archive` uses the mailbox's Archive folder — what OWA's Archive button
   does, not the online-archive mailbox. A mailbox without one exits 64.
-- Nothing is hard-deleted; `--to Deleted` moves to Deleted Items.
+- `delete` moves messages to Deleted Items — what the Delete key does in
+  Outlook — so they can be recovered from there. Messages already in
+  Deleted Items are skipped: nothing is ever permanently deleted. In a
+  shared mailbox, a deleted message disappears for everyone who uses it.
 
 The result adds `destination: { id, displayName, wellKnownName }`, and
 each item's `before` / `after` carry `folderId`.
@@ -415,8 +418,9 @@ outlook draft-forward $ID '{
 
 ### `outlook discard-draft <id>`
 
-Permanently delete a draft. No confirmation prompt — call only when you're
-sure.
+Permanently delete an unsent draft. No confirmation prompt — call only when
+you're sure. Anything that isn't an unsent draft is refused (exit 4); to
+delete a message, use `outlook delete`, which keeps it recoverable.
 
 ### `outlook send-draft <id>`
 

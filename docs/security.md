@@ -126,7 +126,7 @@ Behalf) send mail *as that mailbox*. The guard rails:
 
 | Operation | Side effect | Guard rail |
 | --- | --- | --- |
-| `mark-read`, `move`, `archive`, `categorize` | Visible to everyone who uses the mailbox (read state and categories are shared) | Every id is preflighted; if any is missing nothing changes. `--dry-run` sends only reads. No hard delete exists. |
+| `mark-read`, `move`, `archive`, `delete`, `categorize` | Visible to everyone who uses the mailbox (read state and categories are shared) | Every id is preflighted; if any is missing nothing changes. `--dry-run` sends only reads. `delete` moves to Deleted Items; no permanent delete exists for mail (`discard-draft` only accepts unsent drafts). |
 | `send-draft` | Mail leaves **immediately and irreversibly**, from the target mailbox | Two steps: `--dry-run` preview, then a send that must quote the preview's `changeKey` and is refused if the draft changed. Only unsent drafts in Drafts are sent; a 503 is never retried; a dropped connection is reported, never resent. |
 | `send` | Mail leaves immediately | Confirm recipient, subject, body with the user (SKILL.md). |
 

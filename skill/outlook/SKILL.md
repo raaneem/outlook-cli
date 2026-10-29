@@ -1,6 +1,6 @@
 ---
 name: outlook
-description: Read, search, triage, draft, and send mail PLUS view and manage calendar events through the user's Outlook / Microsoft 365 mailbox, PLUS list Microsoft Teams (teams, channels, chats, members) and post Teams chat messages via Graph. Use when the user asks to check inbox, summarise unread mail, find a specific email, draft a reply they can review, send mail, view their calendar / agenda, find what meetings they have today / this week, create or update calendar events, RSVP to invites, check free/busy, list their Teams / chats, or send a Teams message. Works on shared / delegated mailboxes too via `--mailbox <address>`. Teams needs `outlook auth --all`; reading Teams message bodies may be blocked by tenant scope. Copilot is not supported (streaming protocol). Prefer drafts (`draft`, `draft-reply`, `draft-reply-all`, `draft-forward`) over direct send so the user can review in Outlook first; a draft the user has approved in chat is sent with the two-step `send-draft` (preview, then send quoting the preview's changeKey). Also organises mail: mark read/unread, move/archive, and categorise (validated against the mailbox's master categories). Confirm with the user before creating or cancelling events with attendees (invitations / cancellations send IMMEDIATELY). Requires the `outlook` CLI to be installed on the user's PATH; if it is not, tell the user and stop. All output is JSON to stdout; pipe through `jq` for transformation. This skill does NOT cover Gmail, IMAP, or other mail providers.
+description: Read, search, triage, draft, and send mail PLUS view and manage calendar events through the user's Outlook / Microsoft 365 mailbox, PLUS list Microsoft Teams (teams, channels, chats, members) and post Teams chat messages via Graph. Use when the user asks to check inbox, summarise unread mail, find a specific email, draft a reply they can review, send mail, view their calendar / agenda, find what meetings they have today / this week, create or update calendar events, RSVP to invites, check free/busy, list their Teams / chats, or send a Teams message. Works on shared / delegated mailboxes too via `--mailbox <address>`. Teams needs `outlook auth --all`; reading Teams message bodies may be blocked by tenant scope. Copilot is not supported (streaming protocol). Prefer drafts (`draft`, `draft-reply`, `draft-reply-all`, `draft-forward`) over direct send so the user can review in Outlook first; a draft the user has approved in chat is sent with the two-step `send-draft` (preview, then send quoting the preview's changeKey). Also organises mail: mark read/unread, move/archive, delete (into Deleted Items, recoverable), and categorise (validated against the mailbox's master categories). Confirm with the user before creating or cancelling events with attendees (invitations / cancellations send IMMEDIATELY). Requires the `outlook` CLI to be installed on the user's PATH; if it is not, tell the user and stop. All output is JSON to stdout; pipe through `jq` for transformation. This skill does NOT cover Gmail, IMAP, or other mail providers.
 ---
 
 # Using the `outlook` CLI
@@ -80,6 +80,7 @@ outlook folders                       # list mail folders
 outlook mark-read   <id…> [--dry-run]       # mark messages read
 outlook mark-unread <id…> [--dry-run]       # mark messages unread
 outlook archive     <id…> [--dry-run]       # move to the Archive folder
+outlook delete      <id…> [--dry-run]       # move to Deleted Items (recoverable) — confirm first
 outlook move        <id…> --to <folder> [--dry-run]   # Inbox / Deleted / "Inbox/Projects" / folder Id
 outlook folders [--parent <folder>]         # list folders (or subfolders) to find a --to target
 outlook categories                          # the mailbox's master category names
@@ -90,7 +91,7 @@ outlook draft             <json>  [--attach <path>…]   # new draft (reads STDI
 outlook draft-reply       <id>  [json] [--attach <path>…]   # draft reply to a message
 outlook draft-reply-all   <id>  [json] [--attach <path>…]   # draft reply-all
 outlook draft-forward     <id>  [json] [--attach <path>…]   # draft a forward
-outlook discard-draft     <id>              # delete a draft
+outlook discard-draft     <id>              # delete an unsent draft (refuses anything else)
 outlook send-draft        <id> --dry-run    # preview a draft before sending (prints changeKey)
 outlook send-draft        <id> --expect-change-key <key>   # send it — ONLY after the user approved that preview
 
@@ -255,11 +256,11 @@ outlook unread --from noreply@example.com | jq -r '.value[].Id' | outlook mark-r
   skipped, so re-running only what failed is safe.
 - Only change messages the user asked you to change.
 
-### Moving and archiving
+### Moving, archiving and deleting
 
 ```bash
 outlook archive "$ID"                         # what OWA's Archive button does
-outlook move "$ID" --to Deleted               # soft delete into Deleted Items
+outlook delete "$ID"                          # what the Delete key does: into Deleted Items
 outlook move "$ID" --to "Inbox/Projects"      # folder path, case-insensitive
 ```
 
@@ -269,8 +270,10 @@ outlook move "$ID" --to "Inbox/Projects"      # folder path, case-insensitive
 - `--to` takes a well-known name, a folder path from the top level, or a
   folder Id. An unknown or ambiguous folder fails (exit 64) before any
   message is touched; run `outlook folders [--parent X]` to find names.
-- There is no hard delete. "Delete" means `move --to Deleted`; confirm with
-  the user first.
+- **`delete` moves to Deleted Items**, so it can be undone from there; there
+  is no permanent delete. Confirm with the user first — in a shared mailbox
+  the message disappears for everyone. Never use `discard-draft` to delete
+  mail; it only accepts unsent drafts.
 
 ### Categorising
 
@@ -627,6 +630,7 @@ clearly. Do not loop trying to re-authenticate.
 - "Find emails from this week with attachments" → `outlook list --since 7d --has-attachments`
 - "What did I send to <person> last month?" → `outlook list --folder Sent --to <addr> --since 30d`
 - "Mark those as read" / "archive that" → `outlook mark-read <ids…>` / `outlook archive <ids…>`
+- "Delete those" → confirm which ones, then `outlook delete <ids…>`
 - "Tag it as <category>" → `outlook categories`, then `outlook categorize <id> --add "<name>"`
 - "Send the draft" (after reviewing it in chat) → `outlook send-draft <id> --dry-run`, get a yes, then `--expect-change-key`
 
