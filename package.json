@@ -1,6 +1,6 @@
 {
   "name": "outlook-cli",
-  "version": "0.8.0",
+  "version": "0.9.0",
   "description": "Local CLI that piggybacks on your existing Outlook Web session to read/search/send mail — no app registration, no admin consent.",
   "keywords": [
     "outlook",
